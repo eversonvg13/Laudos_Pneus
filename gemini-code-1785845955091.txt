@@ -1,2 +1,6 @@
 streamlit
-tesseract-ocr
+pillow
+pytesseract
+opencv-python-headless
+numpy
+ultralytics
