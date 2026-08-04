@@ -106,10 +106,17 @@ def parse_relatorio_html(file_bytes):
                 registros.append({c: registro.get(c, "") for c in CAMPOS_FIXOS})
 
     df = pd.DataFrame(registros, columns=CAMPOS_FIXOS)
+    if df.empty:
+        return df
+
     # Em caso de um mesmo Fogo aparecer mais de uma vez (trocas em datas diferentes),
-    # mantém o registro mais recente (última ocorrência no relatório).
-    if not df.empty:
-        df = df.drop_duplicates(subset="FOGO", keep="last").reset_index(drop=True)
+    # mantém o registro cuja data de RETIRADA seja a mais recente — comparando a data
+    # de verdade, não a ordem em que a linha aparece no arquivo (o relatório não vem
+    # necessariamente ordenado cronologicamente).
+    df["_retirada_dt"] = pd.to_datetime(df["RETIRADA"], format="%d/%m/%Y", errors="coerce")
+    df = df.sort_values("_retirada_dt", ascending=False, na_position="last")
+    df = df.drop_duplicates(subset="FOGO", keep="first")
+    df = df.drop(columns="_retirada_dt").sort_values("FOGO").reset_index(drop=True)
     return df
 
 
