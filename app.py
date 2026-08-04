@@ -33,7 +33,7 @@ st.markdown("""
 with st.sidebar:
     st.markdown("## 🛞 SMART-LOG IA")
     st.markdown("**Inspetor Inteligente de Pneus**")
-    st.caption("Powered by Groq (Llama 3.2 90B Vision) · **100% GRATUITO**")
+    st.caption("Powered by Groq (Qwen 3.6 27B Vision) · **100% GRATUITO**")
 
     # Tenta obter a chave da API de st.secrets, depois de variáveis de ambiente
     api_key_stored = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
@@ -45,7 +45,7 @@ with st.sidebar:
         help="Obtenha GRATUITAMENTE em: console.groq.com/keys"
     )
 
-    st.info("🆓 O Groq oferece um nível gratuito generoso e extremamente rápido para o modelo Llama 3.2 90B Vision.")
+    st.info("🆓 O Groq oferece um nível gratuito generoso e extremamente rápido para o modelo Qwen 3.6 27B Vision.")
 
     st.divider()
     st.markdown("""
@@ -83,7 +83,8 @@ modo_analise = st.selectbox(
 # ── Funções ───────────────────────────────────────────────────────────────────
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL_NAME = "llama-3.2-90b-vision-preview"
+# Atualizado para o modelo Qwen 3.6 27B que é o atual suportado para visão
+MODEL_NAME = "qwen/qwen3.6-27b"
 
 def optimize_image(file_bytes: bytes, max_size=(1024, 1024)) -> bytes:
     """Redimensiona e comprime a imagem para reduzir o tamanho do payload."""
@@ -103,11 +104,11 @@ def image_to_base64(file_bytes: bytes) -> str:
     return base64.standard_b64encode(optimized_bytes).decode("utf-8")
 
 def groq_request(api_key: str, messages: list, max_tokens: int = 500) -> str:
-    """Faz uma chamada à API do Groq (Llama 3.2 Vision) usando requests."""
+    """Faz uma chamada à API do Groq usando requests."""
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
     payload = {
         "model": MODEL_NAME,
@@ -180,7 +181,12 @@ Responda SOMENTE o JSON:
 
 def parse_laudo(raw: str) -> dict:
     try:
-        clean = raw.replace("```json", "").replace("```", "").strip()
+        # Limpeza para garantir que apenas o JSON seja processado
+        clean = raw.strip()
+        if "```json" in clean:
+            clean = clean.split("```json")[1].split("```")[0].strip()
+        elif "```" in clean:
+            clean = clean.split("```")[1].split("```")[0].strip()
         return json.loads(clean)
     except Exception:
         return {"fogo": "Erro", "marca": "—", "sulco": "—", "danos": raw, "acao": "Revisar", "confianca": "Baixo", "observacoes": ""}
@@ -201,7 +207,7 @@ if uploaded_files:
 
     if st.button("🚀 Executar Varredura Inteligente", type="primary"):
         if not api_key:
-            st.error("⚠️ Insira sua chave da API Groq.")
+            st.error("⚠️ Insira sua chave da API Groq na barra lateral.")
             st.stop()
 
         sorted_files = sorted(uploaded_files, key=lambda f: f.name)
