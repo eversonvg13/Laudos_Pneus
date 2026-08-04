@@ -23,7 +23,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Configuração da Barra Lateral (Sidebar)
-st.sidebar.title("🛞 SMART-LOG IA")
+st.sidebar.title("Laudo IA")
 st.sidebar.markdown("### Inspetor Inteligente de Pneus")
 st.sidebar.markdown("Desenvolvido com Google Gemini Multimodal AI")
 
@@ -38,7 +38,7 @@ st.sidebar.info("""
 """)
 
 # Cabeçalho Principal
-st.title("🛞 SMART-LOG: Inspeção e Inventário de Pneus por IA")
+st.title("Laudo de Pneus por IA")
 st.markdown("Automatize a identificação do número de **Fogo** e análise cruzada de sulcos agrupando as fotos por pneu (Pares: Lateral + Banda).")
 
 # Verificar chave da API
