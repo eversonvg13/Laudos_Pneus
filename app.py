@@ -35,36 +35,36 @@ def comprimir_imagem(file_bytes, max_dim=1024, qualidade=80):
     img.save(buffer, format="JPEG", quality=qualidade, optimize=True)
     return buffer.getvalue()
 
-def obter_melhor_modelo_disponivel(genai):
-    """Busca dinamicamente o melhor modelo de visão que a sua chave de API permite usar."""
-    modelos_disponiveis = []
+def obter_modelo_estavel(genai):
+    """Retorna um modelo homologado e ativo, ignorando versões descontinuadas."""
+    # Lista de modelos oficiais e suportados em ordem de prioridade
+    modelos_homologados = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-latest"]
     
-    # Lista todos os modelos atrelados à sua chave
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            modelos_disponiveis.append(m.name)
-            
-    # 1. Tenta achar o 1.5 flash (mais rápido e barato)
-    for m in modelos_disponiveis:
-        if '1.5-flash' in m.lower():
-            return m.replace('models/', '')
-            
-    # 2. Tenta achar qualquer versão flash
-    for m in modelos_disponiveis:
-        if 'flash' in m.lower():
-            return m.replace('models/', '')
-            
-    # 3. Tenta achar o antigo pro-vision
-    for m in modelos_disponiveis:
-        if 'vision' in m.lower():
-            return m.replace('models/', '')
-            
-    # 4. Retorna o primeiro modelo multimodal genérico que encontrar
-    if modelos_disponiveis:
-        return modelos_disponiveis[0].replace('models/', '')
+    try:
+        modelos_disponiveis = [
+            m.name.replace('models/', '') 
+            for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
         
-    # Fallback genérico caso a listagem falhe
-    return 'gemini-1.5-flash-latest'
+        # Filtra e ignora modelos descontinuados (como o 2.5)
+        modelos_validos = [m for m in modelos_disponiveis if "2.5" not in m]
+        
+        # Procura por modelos 1.5-flash
+        for m in modelos_validos:
+            if '1.5-flash' in m:
+                return m
+                
+        # Caso não encontre exact match, pega o primeiro homologado que existir na lista
+        for h in modelos_homologados:
+            if h in modelos_validos:
+                return h
+                
+    except Exception:
+        pass
+        
+    # Padrão seguro default
+    return "gemini-1.5-flash"
 
 # Barra Lateral
 st.sidebar.title("🛞 SMART-LOG IA")
@@ -72,11 +72,11 @@ st.sidebar.markdown("### Inspetor Inteligente de Pneus")
 api_key_input = st.sidebar.text_input("Chave da API Gemini", type="password", value=os.environ.get("GEMINI_API_KEY", ""))
 
 st.sidebar.markdown("---")
-st.sidebar.info("As imagens serão comprimidas automaticamente e o sistema caçará o modelo correto para sua API.")
+st.sidebar.info("Fotos comprimidas automaticamente. Modelo fixado na versão estável `gemini-1.5-flash`.")
 
 # Cabeçalho Principal
 st.title("🛞 SMART-LOG: Inspeção de Pneus por IA")
-st.markdown("Agrupamento por âncoras de **Fogo** com compressão de imagens e detecção dinâmica de modelo.")
+st.markdown("Agrupamento por âncoras de **Fogo** com otimização de payload e modelos estáveis.")
 
 # Obter Chave da API
 api_key = api_key_input or st.secrets.get("GEMINI_API_KEY", "")
@@ -111,25 +111,25 @@ if uploaded_files:
                 genai.configure(api_key=api_key)
                 
                 texto_status = st.empty()
-                texto_status.text("Buscando modelo de IA compatível com sua chave...")
+                texto_status.text("Selecionando modelo estável...")
                 
-                # Detecção robusta do modelo
-                nome_modelo_ativo = obter_melhor_modelo_disponivel(genai)
-                texto_status.text(f"Modelo detectado: {nome_modelo_ativo}. Comprimindo imagens...")
+                # Seleção segura do modelo
+                nome_modelo_ativo = obter_modelo_estavel(genai)
+                texto_status.text(f"Conectado ao modelo: {nome_modelo_ativo}. Comprimindo lote de fotos...")
                 
                 model = genai.GenerativeModel(nome_modelo_ativo)
                 
                 # 1. Ordenação cronológica pelo nome do arquivo
                 sorted_files = sorted(uploaded_files, key=lambda f: f.name)
                 
-                # 2. Prepara o lote comprimido para envio em chamada única
+                # 2. Montar requisição em lote com imagens comprimidas
                 conteudo_requisicao = []
                 prompt_instrucoes = f"""
                 Você é um inspetor especialista em inventário de pneus de frota (SMART-LOG).
                 Abaixo estão {len(sorted_files)} fotos ordenadas cronologicamente.
                 
                 Sua tarefa é:
-                1. Analisar todas as imagens e agrupá-las por pneu individual. Cada novo pneu começa com a foto da lateral contendo o número de 'Fogo' (número de identificação pintado em giz/tinta na lateral), seguida pelas fotos da banda de rodagem/sulco/danos daquele pneu até a próxima foto de 'Fogo'.
+                1. Analisar todas as imagens e agrupá-las por pneu individual. Cada novo pneu começa com a foto da lateral contendo o número de 'Fogo' (número de identificação pintado em giz/tinta na lateral, ex: 32813), seguida pelas fotos da banda de rodagem/sulco/danos daquele pneu até a próxima foto de 'Fogo'.
                 2. Para cada pneu agrupado, extraia:
                    - Número do Fogo
                    - Marca/Fabricante
@@ -143,7 +143,6 @@ if uploaded_files:
                 """
                 
                 for f in sorted_files:
-                    # Compressão leve em memória para garantir payload pequeno
                     bytes_comprimidos = comprimir_imagem(f.getvalue())
                     
                     conteudo_requisicao.append(f"Arquivo: {f.name}")
@@ -154,7 +153,7 @@ if uploaded_files:
                 
                 conteudo_requisicao.append(prompt_instrucoes)
                 
-                texto_status.text("Enviando lote para análise da IA...")
+                texto_status.text(f"Enviando dados para a IA ({nome_modelo_ativo})...")
                 resposta_ia = model.generate_content(conteudo_requisicao)
                 
                 st.session_state.inspection_results = [{
@@ -164,7 +163,7 @@ if uploaded_files:
                     "Imagens": sorted_files
                 }]
                 
-                texto_status.success(f"✅ Inspeção concluída com sucesso usando o modelo: {nome_modelo_ativo}")
+                texto_status.success(f"✅ Inspeção concluída com sucesso via {nome_modelo_ativo}!")
                 
             except Exception as e:
                 st.error(f"Erro no processamento: {str(e)}")
@@ -175,7 +174,7 @@ if uploaded_files:
         st.subheader("📊 Relatório Consolidado de Inspeção")
         
         for res in st.session_state.inspection_results:
-            with st.expander(f"🛞 Laudo Geral do Lote ({len(res['Imagens'])} fotos) - Processado via {res.get('Modelo_Usado', 'IA')}", expanded=True):
+            with st.expander(f"🛞 Laudo Geral do Lote ({len(res['Imagens'])} fotos) - Modelo: {res.get('Modelo_Usado', 'gemini-1.5-flash')}", expanded=True):
                 st.markdown("##### Miniaturas Enviadas:")
                 cols = st.columns(min(len(res["Imagens"]), 6))
                 for idx, img_file in enumerate(res["Imagens"]):
