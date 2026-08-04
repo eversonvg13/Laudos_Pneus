@@ -4,7 +4,7 @@ import base64
 import json
 import pandas as pd
 from datetime import datetime
-import requests  # Trocando urllib por requests para melhor compatibilidade
+import requests
 
 # ── Configuração da página ──────────────────────────────────────────────────
 st.set_page_config(
@@ -31,7 +31,7 @@ st.markdown("""
 with st.sidebar:
     st.markdown("## 🛞 SMART-LOG IA")
     st.markdown("**Inspetor Inteligente de Pneus**")
-    st.caption("Powered by Groq (Llama 3.2 Vision) · **100% GRATUITO**")
+    st.caption("Powered by Groq (Llama 3.2 90B Vision) · **100% GRATUITO**")
 
     # Tenta obter a chave da API de st.secrets, depois de variáveis de ambiente
     api_key_stored = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
@@ -43,7 +43,7 @@ with st.sidebar:
         help="Obtenha GRATUITAMENTE em: console.groq.com/keys"
     )
 
-    st.info("🆓 O Groq oferece um nível gratuito generoso e extremamente rápido para o modelo Llama 3.2 Vision.")
+    st.info("🆓 O Groq oferece um nível gratuito generoso e extremamente rápido para o modelo Llama 3.2 90B Vision.")
 
     st.divider()
     st.markdown("""
@@ -81,7 +81,8 @@ modo_analise = st.selectbox(
 # ── Funções ───────────────────────────────────────────────────────────────────
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL_NAME = "llama-3.2-11b-vision-preview"
+# Atualizado para o modelo 90B que é o atual suportado para visão
+MODEL_NAME = "llama-3.2-90b-vision-preview"
 
 def image_to_base64(file_bytes: bytes) -> str:
     return base64.standard_b64encode(file_bytes).decode("utf-8")
@@ -107,7 +108,12 @@ def groq_request(api_key: str, messages: list, max_tokens: int = 500) -> str:
         response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=60)
         
         if response.status_code == 403:
-            raise Exception("Erro 403 (Forbidden): Acesso negado. Verifique se sua chave da API é válida e se o modelo Llama 3.2 Vision está disponível na sua conta.")
+            raise Exception("Erro 403 (Forbidden): Acesso negado. Verifique se sua chave da API é válida.")
+        elif response.status_code == 400:
+            error_data = response.json()
+            if "model_decommissioned" in str(error_data):
+                raise Exception("O modelo de IA foi atualizado pelo provedor. Por favor, contate o suporte.")
+            raise Exception(f"Erro 400: {response.text}")
         elif response.status_code != 200:
             raise Exception(f"Erro na API do Groq ({response.status_code}): {response.text}")
             
@@ -305,7 +311,7 @@ if uploaded_files:
                 with col_marca:
                     st.markdown("**Marca**")
                     st.markdown(f"#### {laudo.get('marca','—')}")
-                with col_sulco:
+                with col_marca:
                     st.markdown("**Sulco**")
                     st.markdown(f"#### {laudo.get('sulco','—')}")
                 with col_acao:
@@ -329,7 +335,7 @@ if uploaded_files:
                     if st.button(f"💾 Salvar Pneu #{res['id']}", key=f"save_{res['id']}"):
                         res["fogo_manual"] = fogo_edit
                         res["status_manual"] = status_edit
-                        st.success(f"Pneu #{res['id']} saved · Fogo: {fogo_edit} · Status: {status_edit}")
+                        st.success(f"Pneu #{res['id']} salvo · Fogo: {fogo_edit} · Status: {status_edit}")
 
         st.divider()
         st.subheader("📥 Exportar Relatório")
