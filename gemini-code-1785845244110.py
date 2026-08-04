@@ -3,7 +3,6 @@ from PIL import Image
 from PIL.ExifTags import TAGS
 from datetime import datetime
 
-# Configuração da página
 st.set_page_config(
     page_title="Gerador de Laudos de Pneus", 
     page_icon="🛞", 
@@ -11,20 +10,15 @@ st.set_page_config(
 )
 
 st.title("🛞 Gerador Automatizado de Laudos de Pneus")
-st.markdown("### Motor de Leitura de Metadados (EXIF)")
-st.write("Arraste as fotos do pátio abaixo. O sistema vai extrair a hora, minuto e segundo exatos da captura de cada imagem diretamente do arquivo.")
+st.markdown("### Agrupamento Inteligente por Intervalo de Tempo (Pátio)")
 
-st.markdown("---")
-
-# Área de Upload de Múltiplas Fotos
 arquivos_fotos = st.file_uploader(
-    "📁 Selecione ou arraste as fotos do pátio (Fogo e Danos):", 
+    "📁 Selecione as fotos do pátio (Fogo e Danos):", 
     type=["jpg", "jpeg", "png"], 
     accept_multiple_files=True
 )
 
 def extrair_data_hora(uploaded_file):
-    """Extrai a data e hora real do EXIF da foto."""
     try:
         uploaded_file.seek(0)
         image = Image.open(uploaded_file)
@@ -36,15 +30,13 @@ def extrair_data_hora(uploaded_file):
                     return datetime.strptime(value, '%Y:%m:%d %H:%M:%S')
     except Exception:
         pass
-    # Retorna uma data mínima se a foto não tiver EXIF (ex: imagem editada ou tirada de print)
     return datetime.min
 
 if arquivos_fotos:
-    st.success(f"✨ **{len(arquivos_fotos)} arquivos carregados com sucesso!**")
-    
-    if st.button("⏱️ Ler Horários Reais e Organizar Lote", type="primary"):
-        with st.spinner("Extraindo metadados EXIF e ordenando cronologicamente..."):
+    if st.button("🔄 Processar Lote por Intervalo de Tempo", type="primary"):
+        with st.spinner("Analisando os segundos entre os cliques..."):
             
+            # 1. Extração e Ordenação Cronológica
             fotos_processadas = []
             for arquivo in arquivos_fotos:
                 timestamp = extrair_data_hora(arquivo)
@@ -54,30 +46,68 @@ if arquivos_fotos:
                     "timestamp": timestamp
                 })
             
-            # Ordena a lista estritamente pela data/hora (da mais antiga para a mais recente)
             fotos_ordenadas = sorted(fotos_processadas, key=lambda x: x["timestamp"])
             
-            st.markdown("### 📋 Linha do Tempo Detectada no Lote")
-            st.write("Veja como as fotos foram capturadas em sequência no seu pátio:")
+            # 2. Agrupamento por Gap de Tempo (Ex: pausa > 45 segundos indica troca de pneu)
+            blocos_pneus = []
+            pneu_atual = {"ancora": None, "danos": []}
             
-            # Exibe a tabela visual com os horários reais extraídos
-            for i, item in enumerate(fotos_ordenadas, 1):
-                col_img, col_info = st.columns([1, 4])
-                
-                with col_img:
-                    item["arquivo"].seek(0)
-                    st.image(item["arquivo"], width=100)
-                
-                with col_info:
-                    st.markdown(f"**Foto #{i}:** `{item['nome']}`")
-                    if item["timestamp"] != datetime.min:
-                        data_formatada = item["timestamp"].strftime('%d/%m/%Y às %H:%M:%S')
-                        st.success(f"🕒 Capturado em: **{data_formatada}**")
-                    else:
-                        st.warning("⚠️ Metadado de horário não encontrado (EXIF ausente).")
-                
-                st.markdown("---")
+            ultimo_tempo = None
+            LIMITE_SEGUNDOS = 45 # Pausa maior que 45s separa um pneu do outro
             
-            st.info("💡 **Próximo passo:** Agora que o sistema já lê e ordena perfeitamente a linha do tempo dos seus cliques, podemos programar a lógica automática de agrupamento (Âncora + Danos) para fechar os laudos de cada pneu!")
+            for i, item in enumerate(fotos_ordenadas):
+                tempo_atual = item["timestamp"]
+                
+                # Se for a primeira foto do lote
+                if i == 0:
+                    pneu_atual["ancora"] = item
+                    ultimo_tempo = tempo_atual
+                    continue
+                
+                # Calcula a diferença de tempo em relação à foto anterior
+                if tempo_atual != datetime.min and ultimo_tempo != datetime.min:
+                    diferenca_segundos = (tempo_atual - ultimo_tempo).total_seconds()
+                else:
+                    diferenca_segundos = 0
+                
+                # Se passou muito tempo, fecha o pneu anterior e abre um novo (a foto atual vira a âncora do novo pneu)
+                if diferenca_segundos > LIMITE_SEGUNDOS:
+                    blocos_pneus.append(pneu_atual)
+                    pneu_atual = {"ancora": item, "danos": []}
+                else:
+                    # Continua no mesmo pneu (foto de dano)
+                    pneu_atual["danos"].append(item)
+                
+                ultimo_tempo = tempo_atual if tempo_atual != datetime.min else ultimo_tempo
+            
+            if pneu_atual["ancora"]:
+                blocos_pneus.append(pneu_atual)
+            
+            # 3. Exibição dos Blocos Organizados
+            st.markdown(f"### 📦 Total de Pneus Identificados: {len(blocos_pneus)}")
+            
+            for idx, bloco in enumerate(blocos_pneus, 1):
+                with st.expander(f"🛞 Pneu #{idx} (Início: {bloco['ancora']['timestamp'].strftime('%H:%M:%S' if bloco['ancora']['timestamp'] != datetime.min else 'Desconhecido')})", expanded=True):
+                    col_ancora, col_danos = st.columns([1, 3])
+                    
+                    with col_ancora:
+                        st.markdown("**📸 Foto Âncora (Fogo)**")
+                        bloco["ancora"]["arquivo"].seek(0)
+                        st.image(bloco["ancora"]["arquivo"], use_column_width=True)
+                        st.caption(f"`{bloco['ancora']['nome']}`")
+                    
+                    with col_danos:
+                        st.markdown(f"**🔍 Danos Registrados ({len(bloco['danos'])} imagens):**")
+                        if bloco["danos"]:
+                            cols_dano = st.columns(len(bloco['danos']) if len(bloco['danos']) > 0 else 1)
+                            for d_idx, dano in enumerate(bloco["danos"]):
+                                with cols_dano[d_idx] if isinstance(cols_dano, list) else st:
+                                    dano["arquivo"].seek(0)
+                                    st.image(dano["arquivo"], width=120)
+                                    st.caption(f"Dano {d_idx+1}")
+                        else:
+                            st.info("Apenas foto âncora neste bloco.")
+                            
+            st.success("✨ Lote agrupado com base na cadência real de inspeção!")
 else:
-    st.info("💡 Faça o upload de algumas fotos reais tiradas no celular para ver o sistema lendo os horários na prática.")
+    st.info("💡 Suba as fotos para testar o agrupamento por intervalo de tempo.")
