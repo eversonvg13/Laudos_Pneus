@@ -9,12 +9,10 @@ import os
 
 try:
     import pytesseract
-    # Força o caminho padrão do Tesseract em ambientes Linux (Streamlit Cloud / Codespaces)
     if os.path.exists('/usr/bin/tesseract'):
         pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
     elif os.path.exists('/usr/local/bin/tesseract'):
         pytesseract.pytesseract.tesseract_cmd = '/usr/local/bin/tesseract'
-        
     OCR_DISPONIVEL = True
 except ImportError:
     OCR_DISPONIVEL = False
@@ -26,7 +24,7 @@ st.set_page_config(
 )
 
 st.title("🛞 Gerador Automatizado de Laudos de Pneus")
-st.markdown("### Motor Universal com Caminho do Tesseract Corrigido")
+st.markdown("### Motor Universal Otimizado para Stencils e Pinturas")
 
 arquivos_fotos = st.file_uploader(
     "📁 Selecione as fotos do pátio (Fogo e Danos):", 
@@ -50,9 +48,9 @@ def extrair_data_hora(uploaded_file):
     return datetime.min
 
 def ler_numero_fogo_universal(uploaded_file):
-    """Processa a imagem e retorna o fogo e o texto bruto lido para diagnóstico."""
+    """Processa a imagem otimizando a leitura de números pintados (fogo)."""
     if not OCR_DISPONIVEL:
-        return "Desconhecido", "OCR Indisponível"
+        return "Desconhecido", "⚠️ Erro: Biblioteca pytesseract não importada."
 
     try:
         uploaded_file.seek(0)
@@ -60,42 +58,45 @@ def ler_numero_fogo_universal(uploaded_file):
         img_cv = cv2.imdecode(file_bytes, 1)
         
         if img_cv is None:
-            return "Desconhecido", "Erro ao decodificar imagem"
+            return "Desconhecido", "⚠️ Erro: Não foi possível decodificar a imagem."
 
-        # 1. Redimensiona para otimizar
+        # 1. Redimensionamento padrão para estabilizar o OCR
         altura, largura = img_cv.shape[:2]
-        fator = 1500 / largura if largura < 1500 else 1.0
+        fator = 1600 / largura if largura < 1600 else 1.0
         if fator != 1.0:
             img_cv = cv2.resize(img_cv, (int(largura * fator), int(altura * fator)))
 
-        # 2. Escala de cinza e limiarização para realçar relevos e tinta
+        # 2. Conversão para escala de cinza e melhoria de contraste (CLAHE)
         gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        binaria = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 11, 2
-        )
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        contraste = clahe.apply(gray)
 
-        # 3. Executa o OCR
-        texto_detectado = pytesseract.image_to_string(binaria, config='--psm 11')
+        # 3. Executa o OCR com PSM 7 (focado em linha única de texto/código)
+        texto_detectado = pytesseract.image_to_string(contraste, config='--psm 7')
+        
+        # Fallback se o PSM 7 vier vazio: tenta PSM 11
+        if not texto_detectado.strip():
+            texto_detectado = pytesseract.image_to_string(contraste, config='--psm 11')
+
         texto_completo = texto_detectado + " " + uploaded_file.name
 
-        # 4. Filtro rigoroso de números técnicos de carga do pneu para evitar falsos positivos
+        # 4. Filtragem de números do pneu
         padroes_encontrados = re.findall(r'\b(\d{3,6})\b', texto_completo)
         
-        # Lista ampliada de números que aparecem no pneu e NÃO são o fogo
-        exclusoes = ['3350', '3150', '850', '18', '7390', '6940', '5', '1']
+        # Exclusões de especificações técnicas comuns
+        exclusoes = ['3350', '3150', '850', '18', '7390', '6940', '5', '1', '385', '65', '225']
         numeros_validos = [num for num in padroes_encontrados if num not in exclusoes]
         
         fogo_encontrado = numeros_validos[0] if numeros_validos else "Desconhecido"
         
-        return fogo_encontrado, texto_detectado.strip()
+        return fogo_encontrado, f"Texto Bruto OCR: '{texto_detectado.strip()}'\nPadrões achados: {padroes_encontrados}"
 
     except Exception as e:
-        return "Desconhecido", str(e)
+        return "Desconhecido", f"⚠️ Erro no processamento OCR: {str(e)}"
 
 if arquivos_fotos:
-    if st.button("🔄 Processar Lote Corrigido", type="primary"):
-        with st.spinner("Analisando imagens e lendo os fogos..."):
+    if st.button("🔄 Processar Lote Atualizado", type="primary"):
+        with st.spinner("Analisando imagens e separando pneus..."):
             
             fotos_processadas = []
             for arquivo in arquivos_fotos:
@@ -112,12 +113,12 @@ if arquivos_fotos:
             # Ordena cronologicamente
             fotos_ordenadas = sorted(fotos_processadas, key=lambda x: x["timestamp"])
             
-            # Agrupamento inteligente
+            # Agrupamento inteligente por Fogo detectado
             blocos_pneus = []
             pneu_atual = None
             
             for i, item in enumerate(fotos_ordenadas):
-                # Se encontrou um número válido de fogo diferente de Desconhecido, abre novo pneu
+                # Se encontrou um número válido de fogo, abre um novo bloco de pneu
                 if i == 0 or item["fogo_id"] != "Desconhecido":
                     if pneu_atual is not None:
                         blocos_pneus.append(pneu_atual)
@@ -128,7 +129,7 @@ if arquivos_fotos:
                         "danos": []
                     }
                 else:
-                    # Senão, acumula como dano do pneu atual
+                    # Caso contrário, anexa como foto de dano do pneu atual
                     if pneu_atual is not None:
                         pneu_atual["danos"].append(item)
                     else:
@@ -141,7 +142,7 @@ if arquivos_fotos:
             if pneu_atual is not None:
                 blocos_pneus.append(pneu_atual)
             
-            # Exibição
+            # Exibição na interface
             st.markdown(f"### 📦 Total de Pneus Identificados: {len(blocos_pneus)}")
             
             for idx, bloco in enumerate(blocos_pneus, 1):
@@ -154,24 +155,27 @@ if arquivos_fotos:
                         bloco["ancora"]["arquivo"].seek(0)
                         st.image(bloco["ancora"]["arquivo"], use_column_width=True)
                         st.caption(f"ID Detectado: **{fogo_exibicao}**")
-                        with st.expander("🔍 Ver OCR Bruto (Depuração)"):
+                        
+                        # Caixa de depuração aberta por padrão para facilitar o diagnóstico
+                        with st.expander("🔍 Ver Diagnóstico OCR", expanded=True):
                             st.text(bloco["ancora"]["texto_bruto"])
                         bloco["ancora"]["arquivo"].seek(0)
                     
                     with col_danos:
-                        st.markdown(f"**🔍 Danos Vinculados ({len(bloco['danos'])} imagens):**")
-                        if bloco["danos"]:
-                            cols_dano = st.columns(len(bloco['danos']))
-                            for d_idx, dano in enumerate(bloco["danos"]):
-                                with cols_dano[d_idx]:
+                        st.markdown(f"**🔍 Danos Vinculados ({len(blocos_pneus[idx-1]['danos'])} imagens):**")
+                        danos_lista = bloco['danos']
+                        if danos_lista:
+                            cols_dano = st.columns(min(len(danos_lista), 4) if len(danos_lista) > 0 else 1)
+                            for d_idx, dano in enumerate(danos_lista):
+                                col_alvo = cols_dano[d_idx % len(cols_dano)]
+                                with col_alvo:
                                     dano["arquivo"].seek(0)
-                                    st.image(dano["arquivo"], width=120)
-                                    dano["caption_text"] = f"OCR: {dano['fogo_id']}"
-                                    st.caption(dano["caption_text"])
+                                    st.image(dano["arquivo"], width=110)
+                                    st.caption(f"OCR: {dano['fogo_id']}")
                                     dano["arquivo"].seek(0)
                         else:
                             st.info("Apenas foto âncora neste bloco.")
                             
-            st.success("✨ Processamento concluído com o caminho do Tesseract ajustado!")
+            st.success("✨ Processamento concluído com motor otimizado!")
 else:
     st.info("💡 Suba as fotos para testar.")
