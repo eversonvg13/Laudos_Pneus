@@ -2,6 +2,14 @@ import streamlit as st
 from PIL import Image
 from PIL.ExifTags import TAGS
 from datetime import datetime
+import re
+
+# Tenta carregar o motor de OCR do Tesseract
+try:
+    import pytesseract
+    OCR_DISPONIVEL = True
+except ImportError:
+    OCR_DISPONIVEL = False
 
 st.set_page_config(
     page_title="Gerador de Laudos de Pneus", 
@@ -10,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("🛞 Gerador Automatizado de Laudos de Pneus")
-st.markdown("### Agrupamento Inteligente por Intervalo de Tempo (Pátio)")
+st.markdown("### Agrupamento por Leitura Automática do Fogo (Âncora)")
 
 arquivos_fotos = st.file_uploader(
     "📁 Selecione as fotos do pátio (Fogo e Danos):", 
@@ -32,82 +40,100 @@ def extrair_data_hora(uploaded_file):
         pass
     return datetime.min
 
-if arquivos_fotos:
-    if st.button("🔄 Processar Lote por Intervalo de Tempo", type="primary"):
-        with st.spinner("Analisando os segundos entre os cliques..."):
+def detectar_fogo(uploaded_file):
+    """Lê o texto da imagem para identificar o número do Fogo."""
+    uploaded_file.seek(0)
+    image = Image.open(uploaded_file)
+    
+    texto_detectado = ""
+    if OCR_DISPONIVEL:
+        try:
+            texto_detectado = pytesseract.image_to_string(image)
+        except Exception:
+            pass
             
-            # 1. Extração e Ordenação Cronológica
+    nome_arquivo = uploaded_file.name
+    
+    # Procura por padrões numéricos que representem o fogo (3 a 6 dígitos)
+    padrao_fogo = re.search(r'(?:fogo|f[\s:\-_]*)?(\d{3,6})', texto_detectado.lower() + " " + nome_arquivo.lower())
+    
+    if padrao_fogo:
+        return padrao_fogo.group(1), True
+        
+    return "Desconhecido", False
+
+if arquivos_fotos:
+    if st.button("🔍 Processar e Separar por Fogo", type="primary"):
+        with st.spinner("Lendo metadados, escaneando os números de fogo e organizando o pátio..."):
+            
+            # 1. Extração, Ordenação Cronológica e Leitura do Fogo
             fotos_processadas = []
             for arquivo in arquivos_fotos:
                 timestamp = extrair_data_hora(arquivo)
+                fogo_id, eh_ancora = detectar_fogo(arquivo)
                 fotos_processadas.append({
                     "arquivo": arquivo,
                     "nome": arquivo.name,
-                    "timestamp": timestamp
+                    "timestamp": timestamp,
+                    "fogo_id": fogo_id,
+                    "eh_ancora": eh_ancora
                 })
             
             fotos_ordenadas = sorted(fotos_processadas, key=lambda x: x["timestamp"])
             
-            # 2. Agrupamento por Gap de Tempo (Ex: pausa > 45 segundos indica troca de pneu)
+            # 2. Agrupamento estrito baseado na mudança de Fogo
             blocos_pneus = []
-            pneu_atual = {"ancora": None, "danos": []}
-            
-            ultimo_tempo = None
-            LIMITE_SEGUNDOS = 45 # Pausa maior que 45s separa um pneu do outro
+            pneu_atual = None
             
             for i, item in enumerate(fotos_ordenadas):
-                tempo_atual = item["timestamp"]
-                
-                # Se for a primeira foto do lote
-                if i == 0:
-                    pneu_atual["ancora"] = item
-                    ultimo_tempo = tempo_atual
-                    continue
-                
-                # Calcula a diferença de tempo em relação à foto anterior
-                if tempo_atual != datetime.min and ultimo_tempo != datetime.min:
-                    diferenca_segundos = (tempo_atual - ultimo_tempo).total_seconds()
+                # Se for a primeira foto do lote ou se encontrou um novo número de fogo válido, abre um novo pneu
+                if i == 0 or item["fogo_id"] != "Desconhecido":
+                    if pneu_atual is not None:
+                        blocos_pneus.append(pneu_atual)
+                    
+                    pneu_atual = {
+                        "ancora": item,
+                        "fogo_numero": item["fogo_id"],
+                        "danos": []
+                    }
                 else:
-                    diferenca_segundos = 0
-                
-                # Se passou muito tempo, fecha o pneu anterior e abre um novo (a foto atual vira a âncora do novo pneu)
-                if diferenca_segundos > LIMITE_SEGUNDOS:
-                    blocos_pneus.append(pneu_atual)
-                    pneu_atual = {"ancora": item, "danos": []}
-                else:
-                    # Continua no mesmo pneu (foto de dano)
-                    pneu_atual["danos"].append(item)
-                
-                ultimo_tempo = tempo_atual if tempo_atual != datetime.min else ultimo_tempo
+                    # Caso contrário, acumula como dano do pneu que está aberto atualmente
+                    if pneu_atual is not None:
+                        pneu_atual["danos"].append(item)
+                    else:
+                        pneu_atual = {
+                            "ancora": item,
+                            "fogo_numero": "Indefinido",
+                            "danos": []
+                        }
             
-            if pneu_atual["ancora"]:
+            if pneu_atual is not None:
                 blocos_pneus.append(pneu_atual)
             
             # 3. Exibição dos Blocos Organizados
             st.markdown(f"### 📦 Total de Pneus Identificados: {len(blocos_pneus)}")
             
             for idx, bloco in enumerate(blocos_pneus, 1):
-                with st.expander(f"🛞 Pneu #{idx} (Início: {bloco['ancora']['timestamp'].strftime('%H:%M:%S' if bloco['ancora']['timestamp'] != datetime.min else 'Desconhecido')})", expanded=True):
+                fogo_exibicao = bloco['fogo_numero'] if bloco['fogo_numero'] != "Desconhecido" else f"Pneu #{idx}"
+                with st.expander(f"🛞 Fogo: {fogo_exibicao} (Início: {bloco['ancora']['timestamp'].strftime('%H:%M:%S' if bloco['ancora']['timestamp'] != datetime.min else 'N/A')})", expanded=True):
                     col_ancora, col_danos = st.columns([1, 3])
                     
                     with col_ancora:
                         st.markdown("**📸 Foto Âncora (Fogo)**")
                         bloco["ancora"]["arquivo"].seek(0)
                         st.image(bloco["ancora"]["arquivo"], use_column_width=True)
-                        st.caption(f"`{bloco['ancora']['nome']}`")
+                        st.caption(f"ID: **{fogo_exibicao}**")
                     
                     with col_danos:
-                        st.markdown(f"**🔍 Danos Registrados ({len(bloco['danos'])} imagens):**")
+                        st.markdown(f"**🔍 Danos Vinculados ({len(bloco['danos'])} imagens):**")
                         if bloco["danos"]:
-                            cols_dano = st.columns(len(bloco['danos']) if len(bloco['danos']) > 0 else 1)
+                            cols_dano = st.columns(len(bloco['danos']))
                             for d_idx, dano in enumerate(bloco["danos"]):
-                                with cols_dano[d_idx] if isinstance(cols_dano, list) else st:
+                                with cols_dano[d_idx]:
                                     dano["arquivo"].seek(0)
                                     st.image(dano["arquivo"], width=120)
                                     st.caption(f"Dano {d_idx+1}")
                         else:
                             st.info("Apenas foto âncora neste bloco.")
                             
-            st.success("✨ Lote agrupado com base na cadência real de inspeção!")
-else:
-    st.info("💡 Suba as fotos para testar o agrupamento por intervalo de tempo.")
+            st.success("✨ Agrupamento concluído respeitando estritamente a sequência de cada Fogo!")
