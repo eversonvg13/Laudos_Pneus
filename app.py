@@ -5,7 +5,7 @@ from datetime import datetime
 
 # Configuração da página
 st.set_page_config(
-    page_title="Laudo de Pneus por IA",
+    page_title="SMART-LOG - Inspetor de Pneus por IA",
     page_icon="🛞",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -23,7 +23,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Configuração da Barra Lateral (Sidebar)
-st.sidebar.title("Laudo IA")
+st.sidebar.title("🛞 SMART-LOG IA")
 st.sidebar.markdown("### Inspetor Inteligente de Pneus")
 st.sidebar.markdown("Desenvolvido com Google Gemini Multimodal AI")
 
@@ -31,15 +31,15 @@ api_key_input = st.sidebar.text_input("Chave da API Gemini (API Key)", type="pas
 
 st.sidebar.markdown("---")
 st.sidebar.info("""
-**Instruções:**
-1. Insira sua chave da API do Google Gemini acima.
-2. Faça o upload das fotos em **pares por pneu** (Ex: Foto 1 = Lateral com Fogo, Foto 2 = Banda de Rodagem).
-3. O sistema agrupará automaticamente as fotos de 2 em 2 para cada pneu!
+**Instruções (Varredura por Âncora):**
+1. Insira sua chave da API do Gemini acima.
+2. Faça o upload de todas as fotos do lote de uma vez.
+3. O sistema ordenará cronologicamente e usará a **Foto de Fogo** como âncora para iniciar cada novo pneu automaticamente!
 """)
 
 # Cabeçalho Principal
-st.title("Laudo de Pneus por IA")
-st.markdown("Automatize a identificação do número de **Fogo** e análise cruzada de sulcos agrupando as fotos por pneu (Pares: Lateral + Banda).")
+st.title("🛞 SMART-LOG: Inspeção e Inventário de Pneus por IA")
+st.markdown("Agrupamento inteligente baseado em âncoras de **Fogo** e análise cronológica de lotes fotográficos.")
 
 # Verificar chave da API
 api_key = api_key_input
@@ -51,7 +51,7 @@ if not api_key:
 
 # Uploader de arquivos
 uploaded_files = st.file_uploader(
-    "📁 Envie as fotos dos pneus (Envie em pares: 2 fotos por pneu)",
+    "📁 Envie o lote completo de fotos dos pneus",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True
 )
@@ -66,13 +66,12 @@ modo_analise = st.selectbox(
 )
 
 if uploaded_files:
-    st.markdown(f"### 📂 Total de arquivos enviados: {len(uploaded_files)} imagens")
-    st.info("💡 As imagens serão agrupadas automaticamente em pares (2 fotos por pneu: a 1ª sendo a lateral com o Fogo e a 2ª a banda de rodagem).")
+    st.markdown(f"### 📂 Lote Carregado: {len(uploaded_files)} imagens detectadas")
     
     if "inspection_results" not in st.session_state:
         st.session_state.inspection_results = []
 
-    if st.button("🚀 Executar Inspeção por Pares de Pneus", type="primary"):
+    if st.button("🚀 Executar Varredura Inteligente e Agrupamento por Âncora", type="primary"):
         if not api_key:
             st.error("⚠️ Por favor, insira sua chave da API Gemini na barra lateral ou configure nas Secrets.")
         else:
@@ -80,35 +79,83 @@ if uploaded_files:
                 import google.generativeai as genai
                 genai.configure(api_key=api_key)
                 
-                # Modelo estável atualizado
+                # Modelo Gemini Flash estável
                 model = genai.GenerativeModel('gemini-1.5-flash')
                 
-                results = []
-                barra_progresso = st.progress(0)
+                # Passo 1: Ordenação Cronológica pelo nome do arquivo (timestamp)
+                sorted_files = sorted(uploaded_files, key=lambda f: f.name)
+                
                 texto_status = st.empty()
+                barra_progresso = st.progress(0)
                 
-                # Agrupar arquivos automaticamente em blocos de 2 (pares por pneu)
-                pares_pneus = [uploaded_files[i:i+2] for i in range(0, len(uploaded_files), 2)]
-                total_pares = len(pares_pneus)
+                # Passo 2: Varredura Inteligente para classificar quais fotos são "Fogo" (Âncora)
+                texto_status.text("Passo 1/2: Executando varredura inteligente nas fotos para identificar as âncoras de Fogo...")
                 
-                for idx, par in enumerate(pares_pneus):
-                    nomes_par = " + ".join([f.name for f in par])
-                    texto_status.text(f"Analisando Pneu {idx+1} de {total_pares} ({nomes_par})...")
+                classificacoes_fotos = []
+                total_arquivos = len(sorted_files)
+                
+                for idx, file in enumerate(sorted_files):
+                    bytes_data = file.getvalue()
+                    img_part = {"mime_type": file.type, "data": bytes_data}
                     
-                    conteudo_requisicao = []
-                    for foto in par:
-                        conteudo_requisicao.append({
-                            "mime_type": foto.type,
-                            "data": foto.getvalue()
-                        })
+                    check_prompt = """
+                    Analise esta imagem de pneu. Responda estritamente se esta foto é principalmente uma foto da lateral focada em mostrar o número de identificação ('Fogo' do pneu pintado ou gravado) ou se é uma foto de banda de rodagem/dano.
+                    Responda exatamente no formato:
+                    TIPO: FOGO (se for a foto principal mostrando claramente o número de fogo) ou DANO (se for foto de banda, sulco ou dano sem foco principal no número de fogo).
+                    """
                     
-                    prompt = f"""
+                    try:
+                        resp = model.generate_content([img_part, check_prompt])
+                        resposta_texto = resp.text.upper()
+                        is_fogo = "TIPO: FOGO" in resposta_texto or ("FOGO" in resposta_texto and "DANO" NOT IN resposta_texto)
+                    except Exception:
+                        # Fallback seguro: se a primeira foto do lote ou a cada X fotos não classificar, assume Dano ou Fogo baseado na ordem
+                        is_fogo = (idx == 0) # Garante que pelo menos a primeira começa um bloco se houver falha
+                    
+                    classificacoes_fotos.append({
+                        "file": file,
+                        "bytes": bytes_data,
+                        "name": file.name,
+                        "is_fogo": is_fogo
+                    })
+                    barra_progresso.progress((idx + 1) / total_arquivos * 0.5)
+
+                # Passo 3: Fechamento de Blocos por Âncora de Fogo
+                texto_status.text("Passo 2/2: Agrupando fotos por pneu e realizando laudos técnicos...")
+                
+                tires_blocks = []
+                current_block = []
+                
+                for item in classificacoes_fotos:
+                    # Se encontrou uma nova foto de Fogo E já temos itens no bloco atual, fechamos o bloco anterior
+                    if item["is_fogo"]:
+                        if current_block:
+                            tires_blocks.append(current_block)
+                            current_block = []
+                    
+                    current_block.append(item)
+                
+                # Adiciona o último bloco restante
+                if current_block:
+                    tires_blocks.append(current_block)
+                
+                # Passo 4: Executar análise completa para cada bloco de pneu formado
+                results = []
+                total_blocos = len(tires_blocks)
+                
+                for b_idx, block in enumerate(tires_blocks):
+                    texto_status.text(f"Analisando Pneu {b_idx+1} de {total_blocos} (Contém {len(block)} foto(s))...")
+                    
+                    conteudo_requisicao = [{"mime_type": item["file"].type, "data": item["bytes"]} for item in block]
+                    nomes_fotos = [item["name"] for item in block]
+                    
+                    prompt_completo = f"""
                     Você é um inspetor especialista em inventário e manutenção de pneus para uma frota de logística (SMART-LOG). 
-                    Estas imagens pertencem ao **mesmo pneu** (sendo a primeira foto a lateral com o número de "Fogo" e a segunda foto a banda de rodagem ou detalhes de danos).
+                    Estas {len(block)} imagens pertencem ao **mesmo pneu** (agrupadas cronologicamente a partir da foto âncora com o número de "Fogo" até as fotos seguintes de banda de rodagem/danos).
                     O modo de análise selecionado é: {modo_analise}.
                     
-                    Analise o par de imagens em conjunto e extraia os seguintes detalhes em português:
-                    1. Fogo (Número de identificação do pneu visível na foto da lateral). Se não estiver visível, estime ou coloque 'Desconhecido'.
+                    Analise o conjunto de imagens deste pneu e extraia os seguintes detalhes em português:
+                    1. Fogo (Número de identificação do pneu visível na foto âncora/lateral). Se não estiver visível, estime ou coloque 'Desconhecido'.
                     2. Marca / Fabricante (ex: Michelin, Bridgestone, Pirelli, Firestone, Goodyear).
                     3. Condição / Status da Profundidade de Sulco (Bom, Desgastado, Crítico / Precisa de Recapagem).
                     4. Danos / Anomalias Detectadas (ex: Cortes, Bolhas, Exposição de carcaça, Desgaste irregular, Vulcanização/Conserto, Nenhum).
@@ -117,45 +164,45 @@ if uploaded_files:
                     
                     Formate sua resposta de forma clara e estruturada.
                     """
-                    conteudo_requisicao.append(prompt)
+                    conteudo_requisicao.append(prompt_completo)
                     
                     try:
-                        resposta = model.generate_content(conteudo_requisicao)
-                        ai_texto = resposta.text
+                        resposta_ia = model.generate_content(conteudo_requisicao)
+                        ai_texto = resposta_ia.text
                     except Exception as e:
-                        ai_texto = f"Erro durante a análise de IA: {str(e)}"
+                        ai_texto = f"Erro na análise de IA: {str(e)}"
                     
                     results.append({
-                        "Pneu_ID": idx + 1,
-                        "Nomes_Arquivos": [f.name for f in par],
+                        "Pneu_ID": b_idx + 1,
+                        "Nomes_Arquivos": nomes_fotos,
                         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "Analise_IA": ai_texto,
-                        "Bytes_Imagens": [f.getvalue() for f in par]
+                        "Bytes_Imagens": [item["bytes"] for item in block]
                     })
                     
-                    barra_progresso.progress((idx + 1) / total_pares)
-                
+                    barra_progresso.progress(0.5 + ((b_idx + 1) / total_blocos * 0.5))
+
                 st.session_state.inspection_results = results
-                texto_status.success("✅ Inspeção por pares concluída com sucesso!")
+                texto_status.success(f"✅ Varredura concluída! {len(tires_blocks)} pneus identificados e agrupados com sucesso.")
                 barra_progresso.empty()
                 
             except Exception as e:
-                st.error(f"Ocorreu um erro ao inicializar a API: {str(e)}")
+                st.error(f"Ocorreu um erro durante o processamento: {str(e)}")
 
     # Exibir Resultados Organizados por Pneu
     if st.session_state.inspection_results:
         st.markdown("---")
-        st.subheader("📊 Resultados da Inspeção por Pneu")
+        st.subheader("📊 Laudos de Inspeção por Pneu (Agrupados por Âncora)")
         
         for i, res in enumerate(st.session_state.inspection_results):
-            with st.expander(f"🛞 Pneu #{res['Pneu_ID']} • Fotos: {', '.join(res['Nomes_Arquivos'])}", expanded=(i==0)):
-                # Exibe as fotos do par lado a lado de forma limpa
+            with st.expander(f"🛞 Pneu #{res['Pneu_ID']} • Fotos do Bloco: {', '.join(res['Nomes_Arquivos'])}", expanded=(i==0)):
+                # Exibe todas as fotos daquele pneu lado a lado
                 cols_imgs = st.columns(len(res["Bytes_Imagens"]))
                 for img_idx, img_bytes in enumerate(res["Bytes_Imagens"]):
                     with cols_imgs[img_idx]:
                         st.image(img_bytes, caption=f"Foto {img_idx+1}: {res['Nomes_Arquivos'][img_idx]}", use_container_width=True)
                 
-                st.markdown("#### 🤖 Diagnóstico da IA")
+                st.markdown("#### 🤖 Diagnóstico da IA para este Pneu")
                 st.write(res["Analise_IA"])
                 
                 # Formulário rápido de revisão / salvamento por pneu
@@ -170,13 +217,13 @@ if uploaded_files:
                         st.success(f"Salvo! Pneu #{res['Pneu_ID']} | Fogo: {edita_fogo or 'Detectado'} | Status: {edita_status}")
 
         # Opção de Exportação em Lote
-        st.markdown("### 📥 Exportar Dados")
+        st.markdown("### 📥 Exportar Dados Consolidados")
         if st.button("Exportar Relatório para CSV"):
             dados_resumo = []
             for res in st.session_state.inspection_results:
                 dados_resumo.append({
                     "Pneu ID": res["Pneu_ID"],
-                    "Arquivos": ", ".join(res["Nomes_Arquivos"]),
+                    "Arquivos do Bloco": ", ".join(res["Nomes_Arquivos"]),
                     "Timestamp": res["Timestamp"],
                     "Resultados": res["Analise_IA"].replace("\n", " ")
                 })
@@ -185,12 +232,12 @@ if uploaded_files:
             st.download_button(
                 label="Baixar Relatório CSV",
                 data=csv,
-                file_name=f"relatorio_pneus_pares_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
+                file_name=f"relatorio_pneus_ancora_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/css"
             )
 
 else:
-    st.info("👆 Por favor, envie as fotos dos pneus em pares (Ex: Foto 1 = Lateral com Fogo, Foto 2 = Banda de Rodagem).")
+    st.info("👆 Por favor, envie o lote de fotos dos pneus para iniciar a varredura inteligente por âncora.")
 
 # Rodapé
 st.markdown("---")
