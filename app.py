@@ -1,164 +1,270 @@
 import streamlit as st
-from bs4 import BeautifulSoup
-from fpdf import FPDF
-from PIL import Image
+import os
 import io
+import pandas as pd
+from datetime import datetime
+from PIL import Image
 
-# --- FUNÇÃO PARA PARSAR O HTML DA PRAXIO ---
-def extrair_dados_pneu(conteudo_html, numero_fogo):
-    soup = BeautifulSoup(conteudo_html, 'html.parser')
-    linhas = soup.find_all('tr')
-    veiculo_atual = "N/A"
+# Configuração da página
+st.set_page_config(
+    page_title="SMART-LOG - Inspetor de Pneus por IA",
+    page_icon="🛞",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-    for linha in linhas:
-        colunas = [td.get_text(strip=True) for td in linha.find_all(['td', 'th'])]
+# Estilização CSS personalizada
+st.markdown("""
+    <style>
+    .main { background-color: #f8fafc; }
+    .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; background-color: #2563eb; color: white; }
+    .stButton>button:hover { background-color: #1d4ed8; color: white; }
+    .stAlert { border-radius: 8px; }
+    </style>
+""", unsafe_allow_html=True)
+
+def comprimir_imagem(file_bytes, max_dim=1024, qualidade=80):
+    """Reduz o tamanho e peso da imagem para caber no payload da API."""
+    img = Image.open(io.BytesIO(file_bytes))
+    img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+    
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
         
-        if len(colunas) >= 8:
-            # Identifica o veículo no bloco visual do relatório
-            if colunas[0] and colunas[0].isdigit():
-                veiculo_atual = colunas[0]
-            
-            fogo = colunas[2]
-            # Normaliza o número de fogo para comparação
-            if fogo.zfill(7) == str(numero_fogo).zfill(7):
-                return {
-                    "veiculo": veiculo_atual,
-                    "posicao": colunas[1],
-                    "fogo": colunas[2],
-                    "medida": colunas[3],
-                    "data_retirada": colunas[4],
-                    "garagem": colunas[5],
-                    "km_posicao": colunas[6],
-                    "km_total": colunas[7]
-                }
-    return None
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=qualidade, optimize=True)
+    return buffer.getvalue()
 
-# --- FUNÇÃO PARA GERAR O PDF NA MEMÓRIA ---
-class PDFLaudo(FPDF):
-    def header(self):
-        self.set_font('Helvetica', 'B', 14)
-        self.cell(0, 10, 'LAUDO TÉCNICO DE INSPEÇÃO DE PNEU', border=False, ln=True, align='C')
-        self.ln(5)
+def obter_modelo_estavel(genai):
+    """Retorna um modelo homologado e ativo, ignorando versões descontinuadas (1.x e 2.x)."""
+    # Lista de modelos oficiais e suportados em ordem de prioridade (família 3.x, ago/2026)
+    # "gemini-flash-latest" é um alias que sempre aponta para o Flash estável mais recente.
+    modelos_homologados = [
+        "gemini-flash-latest",
+        "gemini-3.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+    ]
 
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Helvetica', 'I', 8)
-        self.cell(0, 10, f'Página {self.page_no()}', align='C')
+    # Prefixos de modelos descontinuados/desligados — nunca usar
+    prefixos_descontinuados = ("gemini-1.", "gemini-2.0", "gemini-2.5")
 
-def gerar_pdf_bytes(dados, parecer, fotos_bytes):
-    pdf = PDFLaudo()
-    pdf.add_page()
-    pdf.set_font('Helvetica', '', 10)
+    try:
+        modelos_disponiveis = [
+            m.name.replace('models/', '')
+            for m in genai.list_models()
+            if 'generateContent' in m.supported_generation_methods
+        ]
 
-    # Bloco 1: Dados do Pneu (Tabela)
-    pdf.set_font('Helvetica', 'B', 11)
-    pdf.cell(0, 8, '1. Dados Identificadores (Praxio)', ln=True)
-    pdf.set_font('Helvetica', '', 10)
-    
-    # Grid de dados 2 colunas
-    largura_col = 95
-    pdf.cell(largura_col, 7, f"Número de Fogo: {dados['fogo']}", border=1)
-    pdf.cell(largura_col, 7, f"Veículo: {dados['veiculo']}", border=1, ln=True)
-    
-    pdf.cell(largura_col, 7, f"Medida/Modelo: {dados['medida']}", border=1)
-    pdf.cell(largura_col, 7, f"Posição: {dados['posicao']}", border=1, ln=True)
-    
-    pdf.cell(largura_col, 7, f"Data Retirada: {dados['data_retirada']}", border=1)
-    pdf.cell(largura_col, 7, f"Garagem/Local: {dados['garagem']}", border=1, ln=True)
-    
-    pdf.cell(largura_col, 7, f"Km na Posição: {dados['km_posicao']}", border=1)
-    pdf.cell(largura_col, 7, f"Km Acumulado Total: {dados['km_total']}", border=1, ln=True)
-    
-    pdf.ln(8)
+        # Remove qualquer modelo descontinuado que ainda apareça na listagem
+        modelos_validos = [
+            m for m in modelos_disponiveis
+            if not m.startswith(prefixos_descontinuados)
+        ]
 
-    # Bloco 2: Parecer Técnico
-    pdf.set_font('Helvetica', 'B', 11)
-    pdf.cell(0, 8, '2. Parecer Técnico / Observações da Vistoria', ln=True)
-    pdf.set_font('Helvetica', '', 10)
-    pdf.multi_cell(0, 6, parecer if parecer else "Nenhuma observação informada.", border=1)
-    
-    pdf.ln(8)
+        # 1. Tenta usar, em ordem de preferência, um dos modelos homologados
+        for h in modelos_homologados:
+            if h in modelos_validos:
+                return h
 
-    # Bloco 3: Evidências Fotográficas
-    if fotos_bytes:
-        pdf.set_font('Helvetica', 'B', 11)
-        pdf.cell(0, 8, '3. Registro Fotográfico', ln=True)
-        pdf.ln(2)
+        # 2. Caso nenhum homologado esteja disponível, pega o primeiro "flash" válido
+        for m in modelos_validos:
+            if 'flash' in m:
+                return m
 
-        for idx, img_buffer in enumerate(fotos_bytes):
-            # Garante que a imagem está em formato compatível via PIL
-            image = Image.open(img_buffer)
-            temp_img_path = f"temp_img_{idx}.jpg"
-            image.convert("RGB").save(temp_img_path)
+        # 3. Por fim, qualquer modelo válido restante
+        if modelos_validos:
+            return modelos_validos[0]
 
-            # Adiciona imagem no PDF
-            pdf.image(temp_img_path, w=120)
-            pdf.ln(5)
+    except Exception:
+        pass
 
-    # Retorna o arquivo binário em bytes para o botão de download
-    return bytes(pdf.output())
+    # Padrão seguro default (alias sempre atualizado)
+    return "gemini-flash-latest"
 
+# Barra Lateral
+st.sidebar.title("🛞 SMART-LOG IA")
+st.sidebar.markdown("### Inspetor Inteligente de Pneus")
+api_key_input = st.sidebar.text_input("Chave da API Gemini", type="password", value=os.environ.get("GEMINI_API_KEY", ""))
 
-# --- INTERFACE STREAMLIT ---
-st.title("📋 Gerador de Laudos Técnicos")
-st.caption("SMART-LOG | Módulo de Extração Automática & Vistorias")
+st.sidebar.markdown("---")
+st.sidebar.info("Fotos comprimidas automaticamente. Modelo selecionado dinamicamente entre as versões estáveis da família Gemini 3.x.")
 
-col_left, col_right = st.columns([1, 1])
+# Obter Chave da API
+api_key = api_key_input or st.secrets.get("GEMINI_API_KEY", "")
 
-with col_left:
-    st.subheader("1. Arquivos e Identificação")
-    arquivo_html = st.file_uploader("Upload do Relatório Praxio (.html)", type=["html", "htm"])
-    fogo_busca = st.text_input("Número de Fogo do Pneu:", placeholder="Ex: 0031712")
-    
-    parecer_tecnico = st.text_area(
-        "Parecer Técnico / Motivo do Descarta ou Reparo:",
-        placeholder="Descreva o estado do pneu, avarias encontradas (ex: perfuração na rodagem, separação de cintas)...",
-        height=120
+uploaded_files = st.file_uploader(
+    "📁 Envie o lote completo de fotos dos pneus",
+    type=["jpg", "jpeg", "png"],
+    accept_multiple_files=True
+)
+
+modo_analise = st.selectbox(
+    "Selecione o Modo de Análise",
+    [
+        "Inspeção Completa (ID Fogo + Sulco + Danos)",
+        "Apenas Extrair Número de 'Fogo' (ID do Pneu)",
+        "Análise Profunda de Danos e Desgaste de Banda"
+    ]
+)
+
+# --------------------------------------------------------------------------
+# TABELA DE DADOS DO RELATÓRIO (LAUDO)
+# --------------------------------------------------------------------------
+st.markdown("---")
+st.subheader("📋 Dados do Relatório para Preenchimento do Laudo")
+st.caption(
+    "Preencha uma linha para cada pneu do lote (use o mesmo número de Fogo que aparece na foto). "
+    "Clique no ' + ' no rodapé da tabela para adicionar mais linhas."
+)
+
+if "dados_relatorio" not in st.session_state:
+    st.session_state.dados_relatorio = pd.DataFrame(
+        [{
+            "FOGO": "",
+            "POS": "",
+            "VEICULO": "",
+            "MEDIDA": "",
+            "RETIRADA": "",
+            "LOCAL": "",
+            "KM/POS": "",
+            "KM TOTAL": "",
+        }]
     )
 
-with col_right:
-    st.subheader("2. Fotos da Inspeção")
-    fotos_upload = st.file_uploader(
-        "Selecione as Imagens das Avarias", 
-        type=["jpg", "jpeg", "png"], 
-        accept_multiple_files=True
-    )
+dados_relatorio = st.data_editor(
+    st.session_state.dados_relatorio,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="editor_dados_relatorio",
+    column_config={
+        "FOGO": st.column_config.TextColumn("FOGO", help="Número do Fogo do pneu (deve bater com a foto)"),
+        "POS": st.column_config.TextColumn("POS", help="Posição do pneu no veículo"),
+        "VEICULO": st.column_config.TextColumn("VEICULO", help="Placa/identificação do veículo"),
+        "MEDIDA": st.column_config.TextColumn("MEDIDA", help="Medida do pneu, ex: 295/80R22.5"),
+        "RETIRADA": st.column_config.TextColumn("RETIRADA", help="Data de retirada do veículo"),
+        "LOCAL": st.column_config.TextColumn("LOCAL", help="Garagem/unidade de onde o pneu foi retirado"),
+        "KM/POS": st.column_config.TextColumn("KM/POS", help="Km rodados na posição"),
+        "KM TOTAL": st.column_config.TextColumn("KM TOTAL", help="Km total rodado pelo pneu"),
+    },
+)
+st.session_state.dados_relatorio = dados_relatorio
+
+if uploaded_files:
+    st.markdown(f"### 📂 Lote Carregado: {len(uploaded_files)} imagens detectadas")
     
-    if fotos_upload:
-        st.write(f"📷 **{len(fotos_upload)} foto(s) anexada(s)**")
-        # Exibe miniaturas na tela
-        cols_img = st.columns(min(len(fotos_upload), 3))
-        for idx, img_file in enumerate(fotos_upload):
-            with cols_img[idx % 3]:
-                st.image(img_file, use_container_width=True)
+    if "inspection_results" not in st.session_state:
+        st.session_state.inspection_results = []
 
-st.divider()
-
-# --- PROCESSAMENTO E EXTRAÇÃO ---
-if st.button("🔎 Buscar Dados e Preparar Laudo", type="primary"):
-    if not arquivo_html or not fogo_busca:
-        st.warning("⚠️ Forneça o arquivo HTML do relatório e informe o número de Fogo.")
-    else:
-        conteudo = arquivo_html.getvalue().decode("utf-8", errors="ignore")
-        dados_pneu = extrair_dados_pneu(conteudo, fogo_busca)
-
-        if dados_pneu:
-            st.success(f"Pneu **{fogo_busca}** localizado com sucesso!")
-            
-            # Exibição dos Dados Encontrados
-            st.json(dados_pneu)
-
-            # Gerar PDF em memória
-            list_img_buffers = [io.BytesIO(img.getvalue()) for img in fotos_upload] if fotos_upload else []
-            pdf_bytes = gerar_pdf_bytes(dados_pneu, parecer_tecnico, list_img_buffers)
-
-            # Botão de Download do PDF
-            st.download_button(
-                label="📥 Baixar Laudo Técnico (PDF)",
-                data=pdf_bytes,
-                file_name=f"Laudo_Pneu_{fogo_busca}.pdf",
-                mime="application/pdf",
-                type="secondary"
-            )
+    if st.button("🚀 Executar Varredura e Análise Otimizada", type="primary"):
+        if not api_key:
+            st.error("⚠️ Por favor, insira sua chave da API Gemini na barra lateral.")
         else:
-            st.error(f"❌ O pneu número **{fogo_busca}** não foi localizado no arquivo HTML enviado.")
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=api_key)
+                
+                texto_status = st.empty()
+                texto_status.text("Selecionando modelo estável...")
+                
+                # Seleção segura do modelo
+                nome_modelo_ativo = obter_modelo_estavel(genai)
+                texto_status.text(f"Conectado ao modelo: {nome_modelo_ativo}. Comprimindo lote de fotos...")
+                
+                model = genai.GenerativeModel(nome_modelo_ativo)
+                
+                # 1. Ordenação cronológica pelo nome do arquivo
+                sorted_files = sorted(uploaded_files, key=lambda f: f.name)
+                
+                # 2. Montar requisição em lote com imagens comprimidas
+                conteudo_requisicao = []
+
+                # Converte a tabela preenchida pelo usuário em texto para entrar no prompt
+                dados_validos = st.session_state.dados_relatorio.fillna("").astype(str)
+                dados_validos = dados_validos[dados_validos["FOGO"].str.strip() != ""]
+                if not dados_validos.empty:
+                    tabela_relatorio_txt = dados_validos.to_csv(index=False, sep="|")
+                else:
+                    tabela_relatorio_txt = "(Nenhum dado de relatório foi preenchido pelo usuário.)"
+
+                prompt_instrucoes = f"""
+                Você é um inspetor especialista em inventário de pneus de frota (SMART-LOG).
+                Abaixo estão {len(sorted_files)} fotos ordenadas cronologicamente.
+
+                Além das fotos, você recebeu uma TABELA DE DADOS DO RELATÓRIO preenchida manualmente pelo usuário,
+                no formato CSV separado por "|", com uma linha por pneu:
+
+                {tabela_relatorio_txt}
+
+                Sua tarefa é:
+                1. Analisar todas as imagens e agrupá-las por pneu individual. Cada novo pneu começa com a foto da lateral contendo o número de 'Fogo' (número de identificação pintado em giz/tinta na lateral, ex: 32813), seguida pelas fotos da banda de rodagem/sulco/danos daquele pneu até a próxima foto de 'Fogo'.
+                2. Para cada pneu agrupado, identifique o número de Fogo na foto e procure a linha correspondente na TABELA DE DADOS DO RELATÓRIO (casando pelo campo FOGO).
+                3. Monte o laudo de cada pneu EXATAMENTE no formato abaixo, preenchendo os campos fixos com os dados da tabela (quando existir a linha correspondente) e os campos de análise com o que foi observado nas fotos:
+
+                FOGO:
+                POS:
+                VEICULO:
+                MEDIDA:
+                RETIRADA:
+                LOCAL:
+                KM/POS:
+                KM TOTAL:
+                MARCA/FABRICANTE:
+                CONDIÇÃO DO SULCO:
+                DANOS/ANOMALIAS DETECTADAS:
+                AÇÃO RECOMENDADA:
+                CONFIANÇA DA LEITURA:
+
+                4. Se o número de Fogo identificado na foto NÃO tiver uma linha correspondente na tabela, preencha os campos fixos (POS, VEICULO, MEDIDA, RETIRADA, LOCAL, KM/POS, KM TOTAL) com "NÃO INFORMADO NA PLANILHA" e sinalize isso claramente.
+                5. Se houver uma linha na tabela cujo FOGO não apareça em nenhuma foto, mencione ao final do laudo que esse Fogo não foi localizado nas imagens enviadas.
+
+                Modo de análise solicitado: {modo_analise}.
+                Organize a resposta claramente separada por Pneu (ex: PNEU 1, PNEU 2...).
+                """
+                
+                for f in sorted_files:
+                    bytes_comprimidos = comprimir_imagem(f.getvalue())
+                    
+                    conteudo_requisicao.append(f"Arquivo: {f.name}")
+                    conteudo_requisicao.append({
+                        "mime_type": "image/jpeg",
+                        "data": bytes_comprimidos
+                    })
+                
+                conteudo_requisicao.append(prompt_instrucoes)
+                
+                texto_status.text(f"Enviando dados para a IA ({nome_modelo_ativo})...")
+                resposta_ia = model.generate_content(conteudo_requisicao)
+                
+                st.session_state.inspection_results = [{
+                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Modelo_Usado": nome_modelo_ativo,
+                    "Analise_IA": resposta_ia.text,
+                    "Imagens": sorted_files
+                }]
+                
+                texto_status.success(f"✅ Inspeção concluída com sucesso via {nome_modelo_ativo}!")
+                
+            except Exception as e:
+                st.error(f"Erro no processamento: {str(e)}")
+
+    # Exibição dos Resultados
+    if st.session_state.inspection_results:
+        st.markdown("---")
+        st.subheader("📊 Relatório Consolidado de Inspeção")
+        
+        for res in st.session_state.inspection_results:
+            with st.expander(f"🛞 Laudo Geral do Lote ({len(res['Imagens'])} fotos) - Modelo: {res.get('Modelo_Usado', 'gemini-flash-latest')}", expanded=True):
+                st.markdown("##### Miniaturas Enviadas:")
+                cols = st.columns(min(len(res["Imagens"]), 6))
+                for idx, img_file in enumerate(res["Imagens"]):
+                    with cols[idx % 6]:
+                        st.image(img_file, caption=img_file.name, use_container_width=True)
+                
+                st.markdown("---")
+                st.markdown("#### 🤖 Laudo da IA")
+                st.write(res["Analise_IA"])
+
+else:
+    st.info("👆 Faça o upload das fotos para começar.")
