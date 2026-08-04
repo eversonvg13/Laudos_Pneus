@@ -4,4 +4,3 @@ pytesseract
 opencv-python-headless
 numpy
 ultralytics
-tesseract-ocr
