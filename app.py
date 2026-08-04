@@ -1,202 +1,164 @@
 import streamlit as st
-import os
-import io
-import pandas as pd
-from datetime import datetime
+from bs4 import BeautifulSoup
+from fpdf import FPDF
 from PIL import Image
+import io
 
-# Configuração da página
-st.set_page_config(
-    page_title="SMART-LOG - Inspetor de Pneus por IA",
-    page_icon="🛞",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --- FUNÇÃO PARA PARSAR O HTML DA PRAXIO ---
+def extrair_dados_pneu(conteudo_html, numero_fogo):
+    soup = BeautifulSoup(conteudo_html, 'html.parser')
+    linhas = soup.find_all('tr')
+    veiculo_atual = "N/A"
 
-# Estilização CSS personalizada
-st.markdown("""
-    <style>
-    .main { background-color: #f8fafc; }
-    .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; background-color: #2563eb; color: white; }
-    .stButton>button:hover { background-color: #1d4ed8; color: white; }
-    .stAlert { border-radius: 8px; }
-    </style>
-""", unsafe_allow_html=True)
-
-def comprimir_imagem(file_bytes, max_dim=1024, qualidade=80):
-    """Reduz o tamanho e peso da imagem para caber no payload da API."""
-    img = Image.open(io.BytesIO(file_bytes))
-    img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-    
-    if img.mode in ("RGBA", "P"):
-        img = img.convert("RGB")
+    for linha in linhas:
+        colunas = [td.get_text(strip=True) for td in linha.find_all(['td', 'th'])]
         
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=qualidade, optimize=True)
-    return buffer.getvalue()
+        if len(colunas) >= 8:
+            # Identifica o veículo no bloco visual do relatório
+            if colunas[0] and colunas[0].isdigit():
+                veiculo_atual = colunas[0]
+            
+            fogo = colunas[2]
+            # Normaliza o número de fogo para comparação
+            if fogo.zfill(7) == str(numero_fogo).zfill(7):
+                return {
+                    "veiculo": veiculo_atual,
+                    "posicao": colunas[1],
+                    "fogo": colunas[2],
+                    "medida": colunas[3],
+                    "data_retirada": colunas[4],
+                    "garagem": colunas[5],
+                    "km_posicao": colunas[6],
+                    "km_total": colunas[7]
+                }
+    return None
 
-def obter_modelo_estavel(genai):
-    """Retorna um modelo homologado e ativo, ignorando versões descontinuadas (1.x e 2.x)."""
-    # Lista de modelos oficiais e suportados em ordem de prioridade (família 3.x, ago/2026)
-    # "gemini-flash-latest" é um alias que sempre aponta para o Flash estável mais recente.
-    modelos_homologados = [
-        "gemini-flash-latest",
-        "gemini-3.5-flash",
-        "gemini-3.6-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash-lite",
-    ]
+# --- FUNÇÃO PARA GERAR O PDF NA MEMÓRIA ---
+class PDFLaudo(FPDF):
+    def header(self):
+        self.set_font('Helvetica', 'B', 14)
+        self.cell(0, 10, 'LAUDO TÉCNICO DE INSPEÇÃO DE PNEU', border=False, ln=True, align='C')
+        self.ln(5)
 
-    # Prefixos de modelos descontinuados/desligados — nunca usar
-    prefixos_descontinuados = ("gemini-1.", "gemini-2.0", "gemini-2.5")
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Helvetica', 'I', 8)
+        self.cell(0, 10, f'Página {self.page_no()}', align='C')
 
-    try:
-        modelos_disponiveis = [
-            m.name.replace('models/', '')
-            for m in genai.list_models()
-            if 'generateContent' in m.supported_generation_methods
-        ]
+def gerar_pdf_bytes(dados, parecer, fotos_bytes):
+    pdf = PDFLaudo()
+    pdf.add_page()
+    pdf.set_font('Helvetica', '', 10)
 
-        # Remove qualquer modelo descontinuado que ainda apareça na listagem
-        modelos_validos = [
-            m for m in modelos_disponiveis
-            if not m.startswith(prefixos_descontinuados)
-        ]
-
-        # 1. Tenta usar, em ordem de preferência, um dos modelos homologados
-        for h in modelos_homologados:
-            if h in modelos_validos:
-                return h
-
-        # 2. Caso nenhum homologado esteja disponível, pega o primeiro "flash" válido
-        for m in modelos_validos:
-            if 'flash' in m:
-                return m
-
-        # 3. Por fim, qualquer modelo válido restante
-        if modelos_validos:
-            return modelos_validos[0]
-
-    except Exception:
-        pass
-
-    # Padrão seguro default (alias sempre atualizado)
-    return "gemini-flash-latest"
-
-# Barra Lateral
-st.sidebar.title("🛞 SMART-LOG IA")
-st.sidebar.markdown("### Inspetor Inteligente de Pneus")
-api_key_input = st.sidebar.text_input("Chave da API Gemini", type="password", value=os.environ.get("GEMINI_API_KEY", ""))
-
-st.sidebar.markdown("---")
-st.sidebar.info("Fotos comprimidas automaticamente. Modelo selecionado dinamicamente entre as versões estáveis da família Gemini 3.x.")
-
-# Obter Chave da API
-api_key = api_key_input or st.secrets.get("GEMINI_API_KEY", "")
-
-uploaded_files = st.file_uploader(
-    "📁 Envie o lote completo de fotos dos pneus",
-    type=["jpg", "jpeg", "png"],
-    accept_multiple_files=True
-)
-
-modo_analise = st.selectbox(
-    "Selecione o Modo de Análise",
-    [
-        "Inspeção Completa (ID Fogo + Sulco + Danos)",
-        "Apenas Extrair Número de 'Fogo' (ID do Pneu)",
-        "Análise Profunda de Danos e Desgaste de Banda"
-    ]
-)
-
-if uploaded_files:
-    st.markdown(f"### 📂 Lote Carregado: {len(uploaded_files)} imagens detectadas")
+    # Bloco 1: Dados do Pneu (Tabela)
+    pdf.set_font('Helvetica', 'B', 11)
+    pdf.cell(0, 8, '1. Dados Identificadores (Praxio)', ln=True)
+    pdf.set_font('Helvetica', '', 10)
     
-    if "inspection_results" not in st.session_state:
-        st.session_state.inspection_results = []
+    # Grid de dados 2 colunas
+    largura_col = 95
+    pdf.cell(largura_col, 7, f"Número de Fogo: {dados['fogo']}", border=1)
+    pdf.cell(largura_col, 7, f"Veículo: {dados['veiculo']}", border=1, ln=True)
+    
+    pdf.cell(largura_col, 7, f"Medida/Modelo: {dados['medida']}", border=1)
+    pdf.cell(largura_col, 7, f"Posição: {dados['posicao']}", border=1, ln=True)
+    
+    pdf.cell(largura_col, 7, f"Data Retirada: {dados['data_retirada']}", border=1)
+    pdf.cell(largura_col, 7, f"Garagem/Local: {dados['garagem']}", border=1, ln=True)
+    
+    pdf.cell(largura_col, 7, f"Km na Posição: {dados['km_posicao']}", border=1)
+    pdf.cell(largura_col, 7, f"Km Acumulado Total: {dados['km_total']}", border=1, ln=True)
+    
+    pdf.ln(8)
 
-    if st.button("🚀 Executar Varredura e Análise Otimizada", type="primary"):
-        if not api_key:
-            st.error("⚠️ Por favor, insira sua chave da API Gemini na barra lateral.")
+    # Bloco 2: Parecer Técnico
+    pdf.set_font('Helvetica', 'B', 11)
+    pdf.cell(0, 8, '2. Parecer Técnico / Observações da Vistoria', ln=True)
+    pdf.set_font('Helvetica', '', 10)
+    pdf.multi_cell(0, 6, parecer if parecer else "Nenhuma observação informada.", border=1)
+    
+    pdf.ln(8)
+
+    # Bloco 3: Evidências Fotográficas
+    if fotos_bytes:
+        pdf.set_font('Helvetica', 'B', 11)
+        pdf.cell(0, 8, '3. Registro Fotográfico', ln=True)
+        pdf.ln(2)
+
+        for idx, img_buffer in enumerate(fotos_bytes):
+            # Garante que a imagem está em formato compatível via PIL
+            image = Image.open(img_buffer)
+            temp_img_path = f"temp_img_{idx}.jpg"
+            image.convert("RGB").save(temp_img_path)
+
+            # Adiciona imagem no PDF
+            pdf.image(temp_img_path, w=120)
+            pdf.ln(5)
+
+    # Retorna o arquivo binário em bytes para o botão de download
+    return bytes(pdf.output())
+
+
+# --- INTERFACE STREAMLIT ---
+st.title("📋 Gerador de Laudos Técnicos")
+st.caption("SMART-LOG | Módulo de Extração Automática & Vistorias")
+
+col_left, col_right = st.columns([1, 1])
+
+with col_left:
+    st.subheader("1. Arquivos e Identificação")
+    arquivo_html = st.file_uploader("Upload do Relatório Praxio (.html)", type=["html", "htm"])
+    fogo_busca = st.text_input("Número de Fogo do Pneu:", placeholder="Ex: 0031712")
+    
+    parecer_tecnico = st.text_area(
+        "Parecer Técnico / Motivo do Descarta ou Reparo:",
+        placeholder="Descreva o estado do pneu, avarias encontradas (ex: perfuração na rodagem, separação de cintas)...",
+        height=120
+    )
+
+with col_right:
+    st.subheader("2. Fotos da Inspeção")
+    fotos_upload = st.file_uploader(
+        "Selecione as Imagens das Avarias", 
+        type=["jpg", "jpeg", "png"], 
+        accept_multiple_files=True
+    )
+    
+    if fotos_upload:
+        st.write(f"📷 **{len(fotos_upload)} foto(s) anexada(s)**")
+        # Exibe miniaturas na tela
+        cols_img = st.columns(min(len(fotos_upload), 3))
+        for idx, img_file in enumerate(fotos_upload):
+            with cols_img[idx % 3]:
+                st.image(img_file, use_container_width=True)
+
+st.divider()
+
+# --- PROCESSAMENTO E EXTRAÇÃO ---
+if st.button("🔎 Buscar Dados e Preparar Laudo", type="primary"):
+    if not arquivo_html or not fogo_busca:
+        st.warning("⚠️ Forneça o arquivo HTML do relatório e informe o número de Fogo.")
+    else:
+        conteudo = arquivo_html.getvalue().decode("utf-8", errors="ignore")
+        dados_pneu = extrair_dados_pneu(conteudo, fogo_busca)
+
+        if dados_pneu:
+            st.success(f"Pneu **{fogo_busca}** localizado com sucesso!")
+            
+            # Exibição dos Dados Encontrados
+            st.json(dados_pneu)
+
+            # Gerar PDF em memória
+            list_img_buffers = [io.BytesIO(img.getvalue()) for img in fotos_upload] if fotos_upload else []
+            pdf_bytes = gerar_pdf_bytes(dados_pneu, parecer_tecnico, list_img_buffers)
+
+            # Botão de Download do PDF
+            st.download_button(
+                label="📥 Baixar Laudo Técnico (PDF)",
+                data=pdf_bytes,
+                file_name=f"Laudo_Pneu_{fogo_busca}.pdf",
+                mime="application/pdf",
+                type="secondary"
+            )
         else:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=api_key)
-                
-                texto_status = st.empty()
-                texto_status.text("Selecionando modelo estável...")
-                
-                # Seleção segura do modelo
-                nome_modelo_ativo = obter_modelo_estavel(genai)
-                texto_status.text(f"Conectado ao modelo: {nome_modelo_ativo}. Comprimindo lote de fotos...")
-                
-                model = genai.GenerativeModel(nome_modelo_ativo)
-                
-                # 1. Ordenação cronológica pelo nome do arquivo
-                sorted_files = sorted(uploaded_files, key=lambda f: f.name)
-                
-                # 2. Montar requisição em lote com imagens comprimidas
-                conteudo_requisicao = []
-                prompt_instrucoes = f"""
-                Você é um inspetor especialista em inventário de pneus de frota (SMART-LOG).
-                Abaixo estão {len(sorted_files)} fotos ordenadas cronologicamente.
-                
-                Sua tarefa é:
-                1. Analisar todas as imagens e agrupá-las por pneu individual. Cada novo pneu começa com a foto da lateral contendo o número de 'Fogo' (número de identificação pintado em giz/tinta na lateral, ex: 32813), seguida pelas fotos da banda de rodagem/sulco/danos daquele pneu até a próxima foto de 'Fogo'.
-                2. Para cada pneu agrupado, extraia:
-                   - Número do Fogo
-                   - Marca/Fabricante
-                   - Condição do Sulco
-                   - Danos/Anomalias Detectadas
-                   - Ação Recomendada
-                   - Confiança da Leitura
-                
-                Modo de análise solicitado: {modo_analise}.
-                Organize a resposta claramente separada por Pneu (ex: PNEU 1, PNEU 2...).
-                """
-                
-                for f in sorted_files:
-                    bytes_comprimidos = comprimir_imagem(f.getvalue())
-                    
-                    conteudo_requisicao.append(f"Arquivo: {f.name}")
-                    conteudo_requisicao.append({
-                        "mime_type": "image/jpeg",
-                        "data": bytes_comprimidos
-                    })
-                
-                conteudo_requisicao.append(prompt_instrucoes)
-                
-                texto_status.text(f"Enviando dados para a IA ({nome_modelo_ativo})...")
-                resposta_ia = model.generate_content(conteudo_requisicao)
-                
-                st.session_state.inspection_results = [{
-                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Modelo_Usado": nome_modelo_ativo,
-                    "Analise_IA": resposta_ia.text,
-                    "Imagens": sorted_files
-                }]
-                
-                texto_status.success(f"✅ Inspeção concluída com sucesso via {nome_modelo_ativo}!")
-                
-            except Exception as e:
-                st.error(f"Erro no processamento: {str(e)}")
-
-    # Exibição dos Resultados
-    if st.session_state.inspection_results:
-        st.markdown("---")
-        st.subheader("📊 Relatório Consolidado de Inspeção")
-        
-        for res in st.session_state.inspection_results:
-            with st.expander(f"🛞 Laudo Geral do Lote ({len(res['Imagens'])} fotos) - Modelo: {res.get('Modelo_Usado', 'gemini-flash-latest')}", expanded=True):
-                st.markdown("##### Miniaturas Enviadas:")
-                cols = st.columns(min(len(res["Imagens"]), 6))
-                for idx, img_file in enumerate(res["Imagens"]):
-                    with cols[idx % 6]:
-                        st.image(img_file, caption=img_file.name, use_container_width=True)
-                
-                st.markdown("---")
-                st.markdown("#### 🤖 Laudo da IA")
-                st.write(res["Analise_IA"])
-
-else:
-    st.info("👆 Faça o upload das fotos para começar.")
+            st.error(f"❌ O pneu número **{fogo_busca}** não foi localizado no arquivo HTML enviado.")
