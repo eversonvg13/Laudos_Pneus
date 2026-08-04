@@ -36,35 +36,52 @@ def comprimir_imagem(file_bytes, max_dim=1024, qualidade=80):
     return buffer.getvalue()
 
 def obter_modelo_estavel(genai):
-    """Retorna um modelo homologado e ativo, ignorando versões descontinuadas."""
-    # Lista de modelos oficiais e suportados em ordem de prioridade
-    modelos_homologados = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-latest"]
-    
+    """Retorna um modelo homologado e ativo, ignorando versões descontinuadas (1.x e 2.x)."""
+    # Lista de modelos oficiais e suportados em ordem de prioridade (família 3.x, ago/2026)
+    # "gemini-flash-latest" é um alias que sempre aponta para o Flash estável mais recente.
+    modelos_homologados = [
+        "gemini-flash-latest",
+        "gemini-3.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+    ]
+
+    # Prefixos de modelos descontinuados/desligados — nunca usar
+    prefixos_descontinuados = ("gemini-1.", "gemini-2.0", "gemini-2.5")
+
     try:
         modelos_disponiveis = [
-            m.name.replace('models/', '') 
-            for m in genai.list_models() 
+            m.name.replace('models/', '')
+            for m in genai.list_models()
             if 'generateContent' in m.supported_generation_methods
         ]
-        
-        # Filtra e ignora modelos descontinuados (como o 2.5)
-        modelos_validos = [m for m in modelos_disponiveis if "2.5" not in m]
-        
-        # Procura por modelos 1.5-flash
-        for m in modelos_validos:
-            if '1.5-flash' in m:
-                return m
-                
-        # Caso não encontre exact match, pega o primeiro homologado que existir na lista
+
+        # Remove qualquer modelo descontinuado que ainda apareça na listagem
+        modelos_validos = [
+            m for m in modelos_disponiveis
+            if not m.startswith(prefixos_descontinuados)
+        ]
+
+        # 1. Tenta usar, em ordem de preferência, um dos modelos homologados
         for h in modelos_homologados:
             if h in modelos_validos:
                 return h
-                
+
+        # 2. Caso nenhum homologado esteja disponível, pega o primeiro "flash" válido
+        for m in modelos_validos:
+            if 'flash' in m:
+                return m
+
+        # 3. Por fim, qualquer modelo válido restante
+        if modelos_validos:
+            return modelos_validos[0]
+
     except Exception:
         pass
-        
-    # Padrão seguro default
-    return "gemini-1.5-flash"
+
+    # Padrão seguro default (alias sempre atualizado)
+    return "gemini-flash-latest"
 
 # Barra Lateral
 st.sidebar.title("🛞 SMART-LOG IA")
@@ -72,11 +89,7 @@ st.sidebar.markdown("### Inspetor Inteligente de Pneus")
 api_key_input = st.sidebar.text_input("Chave da API Gemini", type="password", value=os.environ.get("GEMINI_API_KEY", ""))
 
 st.sidebar.markdown("---")
-st.sidebar.info("Fotos comprimidas automaticamente. Modelo fixado na versão estável `gemini-1.5-flash`.")
-
-# Cabeçalho Principal
-st.title("🛞 SMART-LOG: Inspeção de Pneus por IA")
-st.markdown("Agrupamento por âncoras de **Fogo** com otimização de payload e modelos estáveis.")
+st.sidebar.info("Fotos comprimidas automaticamente. Modelo selecionado dinamicamente entre as versões estáveis da família Gemini 3.x.")
 
 # Obter Chave da API
 api_key = api_key_input or st.secrets.get("GEMINI_API_KEY", "")
@@ -174,7 +187,7 @@ if uploaded_files:
         st.subheader("📊 Relatório Consolidado de Inspeção")
         
         for res in st.session_state.inspection_results:
-            with st.expander(f"🛞 Laudo Geral do Lote ({len(res['Imagens'])} fotos) - Modelo: {res.get('Modelo_Usado', 'gemini-1.5-flash')}", expanded=True):
+            with st.expander(f"🛞 Laudo Geral do Lote ({len(res['Imagens'])} fotos) - Modelo: {res.get('Modelo_Usado', 'gemini-flash-latest')}", expanded=True):
                 st.markdown("##### Miniaturas Enviadas:")
                 cols = st.columns(min(len(res["Imagens"]), 6))
                 for idx, img_file in enumerate(res["Imagens"]):
