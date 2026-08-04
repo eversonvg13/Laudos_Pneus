@@ -55,7 +55,7 @@ with st.sidebar:
 3. O sistema ordena cronologicamente pelo nome do arquivo.
 4. A IA identifica as **fotos de Fogo** (lateral com número) como âncoras.
 5. As fotos seguintes são agrupadas como danos daquele pneu.
-6. Um laudo é gerado para cada pneu.
+6. Um laudo consolidado é gerado para cada pneu, analisando todas as fotos individualmente.
 """)
 
 # ── Cabeçalho ────────────────────────────────────────────────────────────────
@@ -85,27 +85,20 @@ modo_analise = st.selectbox(
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL_NAME = "llama-3.2-90b-vision-preview"
 
-def optimize_image(file_bytes: bytes, max_size=(800, 800)) -> bytes:
+def optimize_image(file_bytes: bytes, max_size=(1024, 1024)) -> bytes:
     """Redimensiona e comprime a imagem para reduzir o tamanho do payload."""
     try:
         img = Image.open(BytesIO(file_bytes))
-        # Converte para RGB se necessário (ex: PNG com transparência)
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
-        
-        # Redimensiona mantendo o aspect ratio
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
-        
-        # Salva de volta para bytes com compressão JPEG
         buffer = BytesIO()
-        img.save(buffer, format="JPEG", quality=70, optimize=True)
+        img.save(buffer, format="JPEG", quality=80, optimize=True)
         return buffer.getvalue()
     except Exception as e:
-        st.error(f"Erro ao otimizar imagem: {e}")
         return file_bytes
 
 def image_to_base64(file_bytes: bytes) -> str:
-    # Otimiza antes de converter para base64
     optimized_bytes = optimize_image(file_bytes)
     return base64.standard_b64encode(optimized_bytes).decode("utf-8")
 
@@ -114,9 +107,8 @@ def groq_request(api_key: str, messages: list, max_tokens: int = 500) -> str:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0"
     }
-    
     payload = {
         "model": MODEL_NAME,
         "messages": messages,
@@ -125,93 +117,65 @@ def groq_request(api_key: str, messages: list, max_tokens: int = 500) -> str:
         "top_p": 1,
         "stream": False
     }
-    
     try:
         response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=60)
-        
-        if response.status_code == 413:
-            raise Exception("Erro 413: As imagens ainda são muito grandes. Tente enviar menos fotos por pneu.")
-        elif response.status_code != 200:
-            raise Exception(f"Erro na API do Groq ({response.status_code}): {response.text}")
-            
+        if response.status_code != 200:
+            raise Exception(f"Erro na API ({response.status_code}): {response.text}")
         data = response.json()
         return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         raise Exception(f"Falha na comunicação: {str(e)}")
 
-def classificar_fogo(api_key: str, img_bytes: bytes, media_type: str) -> bool:
-    """Retorna True se a foto for de FOGO (âncora de novo pneu)."""
+def classificar_fogo(api_key: str, img_bytes: bytes) -> bool:
+    """Retorna True se a foto for de FOGO."""
     base64_image = image_to_base64(img_bytes)
     messages = [
         {
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        "Esta é uma foto de pneu de caminhão. "
-                        "Verifique se ela mostra a LATERAL do pneu com um número de identificação "
-                        "pintado ou gravado (chamado 'número de Fogo', geralmente em tinta amarela ou branca). "
-                        "Responda APENAS com a palavra FOGO se for a lateral com o número de identificação, "
-                        "ou DANO se for foto de banda de rodagem, sulco, desgaste ou avaria. "
-                        "Responda somente FOGO ou DANO, sem mais nada."
-                    )
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_image}"
-                    }
-                }
+                {"type": "text", "text": "Esta foto mostra a LATERAL de um pneu com um NÚMERO DE FOGO (identificação pintada/gravada)? Responda apenas FOGO ou DANO."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]
         }
     ]
     answer = groq_request(api_key, messages, max_tokens=10).upper()
-    return "FOGO" in answer and "DANO" not in answer
+    return "FOGO" in answer
 
-def analisar_pneu(api_key: str, block: list, modo: str) -> str:
-    """Gera laudo JSON para um bloco de fotos do mesmo pneu."""
-    content = [
+def analisar_foto_individual(api_key: str, img_bytes: bytes) -> str:
+    """Analisa uma única foto e retorna uma descrição do que foi visto."""
+    base64_image = image_to_base64(img_bytes)
+    messages = [
         {
-            "type": "text",
-            "text": f"""Você é um inspetor especialista em pneus de frota de logística (SMART-LOG).
-Estas {len(block)} imagens pertencem ao MESMO pneu (agrupadas cronologicamente):
-- Primeira imagem: lateral com número de Fogo (âncora).
-- Demais: banda de rodagem, sulcos e possíveis danos.
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Descreva brevemente o que você vê nesta foto de pneu (Número de Fogo, Marca, estado do sulco, ou danos específicos como cortes/bolhas). Seja conciso."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+            ]
+        }
+    ]
+    return groq_request(api_key, messages, max_tokens=150)
+
+def consolidar_laudo(api_key: str, descricoes: list, modo: str) -> str:
+    """Gera o laudo JSON final baseado nas descrições de todas as fotos do bloco."""
+    prompt = f"""Você é um inspetor de pneus. Com base nas seguintes descrições de várias fotos do MESMO pneu, gere um laudo final em JSON.
+
+Descrições das fotos:
+{chr(10).join(descricoes)}
 
 Modo de análise: {modo}
 
-Responda SOMENTE com o JSON abaixo (sem markdown, sem texto extra):
+Responda SOMENTE o JSON:
 {{
-  "fogo": "<número gravado/pintado na lateral, ou Desconhecido>",
-  "marca": "<Michelin/Bridgestone/Pirelli/Firestone/Goodyear/Outra/Não identificada>",
-  "sulco": "<Bom (>=4mm) / Desgastado (2-4mm) / Crítico (<2mm)>",
-  "danos": "<danos encontrados ou Nenhum>",
-  "acao": "<Manter em serviço / Enviar para recapagem / Sucatear imediatamente / Inspecionar detalhadamente>",
-  "confianca": "<Alto / Médio / Baixo>",
-  "observacoes": "<notas adicionais>"
+  "fogo": "<número de identificação encontrado>",
+  "marca": "<marca do pneu>",
+  "sulco": "<Bom/Desgastado/Crítico>",
+  "danos": "<resumo dos danos encontrados>",
+  "acao": "<Manter em serviço/Recapagem/Sucatear/Revisar>",
+  "confianca": "<Alto/Médio/Baixo>",
+  "observacoes": "<notas finais>"
 }}"""
-        }
-    ]
     
-    # Se houver muitas fotos, limitamos para não estourar o limite da API
-    # Priorizamos a primeira (Fogo) e as últimas (danos)
-    max_images = 5
-    if len(block) > max_images:
-        selected_block = [block[0]] + block[-(max_images-1):]
-    else:
-        selected_block = block
-
-    for item in selected_block:
-        base64_image = image_to_base64(item["bytes"])
-        content.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{base64_image}"
-            }
-        })
-
-    messages = [{"role": "user", "content": content}]
+    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     return groq_request(api_key, messages, max_tokens=500)
 
 def parse_laudo(raw: str) -> dict:
@@ -219,25 +183,14 @@ def parse_laudo(raw: str) -> dict:
         clean = raw.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception:
-        return {
-            "fogo": "Erro ao interpretar",
-            "marca": "—", "sulco": "—",
-            "danos": raw,
-            "acao": "Inspecionar detalhadamente",
-            "confianca": "Baixo",
-            "observacoes": "Resposta inesperada da IA.",
-        }
+        return {"fogo": "Erro", "marca": "—", "sulco": "—", "danos": raw, "acao": "Revisar", "confianca": "Baixo", "observacoes": ""}
 
 def status_badge(acao: str) -> str:
     a = acao.lower()
-    if "serviço" in a or "manter" in a:
-        return '<span class="badge-ok">✅ Manter em Serviço</span>'
-    elif "recapagem" in a:
-        return '<span class="badge-recap">🔄 Recapagem</span>'
-    elif "sucatear" in a:
-        return '<span class="badge-scrap">⛔ Sucatear</span>'
-    else:
-        return '<span class="badge-review">🔍 Revisar</span>'
+    if "serviço" in a or "manter" in a: return '<span class="badge-ok">✅ Manter em Serviço</span>'
+    elif "recapagem" in a: return '<span class="badge-recap">🔄 Recapagem</span>'
+    elif "sucatear" in a: return '<span class="badge-scrap">⛔ Sucatear</span>'
+    else: return '<span class="badge-review">🔍 Revisar</span>'
 
 # ── Execução principal ────────────────────────────────────────────────────────
 if uploaded_files:
@@ -248,7 +201,7 @@ if uploaded_files:
 
     if st.button("🚀 Executar Varredura Inteligente", type="primary"):
         if not api_key:
-            st.error("⚠️ Insira sua chave da API Groq na barra lateral. Obtenha gratuitamente em console.groq.com/keys")
+            st.error("⚠️ Insira sua chave da API Groq.")
             st.stop()
 
         sorted_files = sorted(uploaded_files, key=lambda f: f.name)
@@ -256,137 +209,79 @@ if uploaded_files:
         progress = st.progress(0)
         total = len(sorted_files)
 
-        # Passo 1: Classificar FOGO ou DANO
-        status_txt.info("Passo 1/2 · Identificando âncoras de Fogo…")
-        classificadas = []
-
+        # Passo 1: Classificar e Agrupar
+        status_txt.info("Passo 1/3 · Identificando âncoras de Fogo…")
+        blocks, current = [], []
+        
         for idx, f in enumerate(sorted_files):
             raw_bytes = f.read()
-            media_type = f.type or "image/jpeg"
             try:
-                is_fogo = classificar_fogo(api_key, raw_bytes, media_type)
-            except Exception as e:
-                st.warning(f"Erro ao classificar '{f.name}': {e}. Assumindo DANO.")
+                is_fogo = classificar_fogo(api_key, raw_bytes)
+            except:
                 is_fogo = False
-
-            classificadas.append({"name": f.name, "bytes": raw_bytes, "media_type": media_type, "is_fogo": is_fogo})
-            progress.progress((idx + 1) / total * 0.45)
-
-        # Passo 2: Agrupar em blocos por âncora de Fogo
-        blocks, current = [], []
-        for item in classificadas:
-            if item["is_fogo"]:
-                if current:
-                    blocks.append(current)
+            
+            item = {"name": f.name, "bytes": raw_bytes, "is_fogo": is_fogo}
+            if is_fogo and current:
+                blocks.append(current)
                 current = []
             current.append(item)
-        if current:
-            blocks.append(current)
+            progress.progress((idx + 1) / total * 0.3)
+        if current: blocks.append(current)
 
-        # Passo 3: Gerar laudos
-        status_txt.info(f"Passo 2/2 · Gerando laudos para {len(blocks)} pneu(s)…")
+        # Passo 2 e 3: Analisar fotos e Consolidar
         results = []
-
         for b_idx, block in enumerate(blocks):
-            status_txt.info(f"Analisando pneu {b_idx+1} de {len(blocks)} ({len(block)} foto(s))…")
+            status_txt.info(f"Analisando pneu {b_idx+1} de {len(blocks)} ({len(block)} fotos)…")
+            
+            descricoes = []
+            for img_idx, item in enumerate(block):
+                try:
+                    desc = analisar_foto_individual(api_key, item["bytes"])
+                    descricoes.append(f"Foto {img_idx+1} ({item['name']}): {desc}")
+                except Exception as e:
+                    descricoes.append(f"Foto {img_idx+1}: Erro na análise individual.")
+            
             try:
-                raw_laudo = analisar_pneu(api_key, block, modo_analise)
+                raw_laudo = consolidar_laudo(api_key, descricoes, modo_analise)
                 laudo = parse_laudo(raw_laudo)
             except Exception as e:
-                laudo = {"fogo": "Erro", "marca": "—", "sulco": "—", "danos": str(e),
-                         "acao": "Inspecionar detalhadamente", "confianca": "Baixo", "observacoes": ""}
+                laudo = {"fogo": "Erro", "marca": "—", "sulco": "—", "danos": str(e), "acao": "Revisar", "confianca": "Baixo", "observacoes": ""}
 
             results.append({
                 "id": b_idx + 1,
                 "files": [i["name"] for i in block],
                 "bytes_list": [i["bytes"] for i in block],
-                "media_types": [i["media_type"] for i in block],
                 "laudo": laudo,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "status_manual": "Aprovado",
                 "fogo_manual": "",
             })
-            progress.progress(0.45 + (b_idx + 1) / len(blocks) * 0.55)
+            progress.progress(0.3 + (b_idx + 1) / len(blocks) * 0.7)
 
         st.session_state.results = results
         progress.empty()
-        status_txt.success(f"✅ Varredura concluída! {len(blocks)} pneu(s) identificado(s).")
+        status_txt.success(f"✅ Concluído! {len(blocks)} pneu(s) analisado(s).")
 
     # ── Resultados ────────────────────────────────────────────────────────────
     if st.session_state.results:
-        st.divider()
-        st.subheader("📊 Laudos por Pneu")
-
         for res in st.session_state.results:
             laudo = res["laudo"]
-            with st.expander(
-                f"🛞 Pneu #{res['id']}  ·  Fogo: {laudo.get('fogo','?')}  ·  {len(res['files'])} foto(s)",
-                expanded=(res["id"] == 1),
-            ):
+            with st.expander(f"🛞 Pneu #{res['id']} · Fogo: {laudo.get('fogo','?')} · {len(res['files'])} fotos", expanded=(res["id"] == 1)):
                 cols = st.columns(min(len(res["bytes_list"]), 4))
                 for i, img_b in enumerate(res["bytes_list"]):
-                    with cols[i % 4]:
-                        st.image(img_b, caption=res["files"][i], use_container_width=True)
-
+                    with cols[i % 4]: st.image(img_b, use_container_width=True)
+                
                 st.divider()
-                col_id, col_marca, col_sulco, col_acao = st.columns(4)
-                with col_id:
-                    st.markdown("**ID Fogo**")
-                    st.markdown(f'<span class="fogo-id">{laudo.get("fogo","?")}</span>', unsafe_allow_html=True)
-                with col_marca:
-                    st.markdown("**Marca**")
-                    st.markdown(f"#### {laudo.get('marca','—')}")
-                with col_sulco:
-                    st.markdown("**Sulco**")
-                    st.markdown(f"#### {laudo.get('sulco','—')}")
-                with col_acao:
-                    st.markdown("**Ação Recomendada**")
-                    st.markdown(status_badge(laudo.get("acao", "")), unsafe_allow_html=True)
-
-                if laudo.get("danos"):
-                    st.markdown(f"**Danos / Anomalias:** {laudo['danos']}")
-                if laudo.get("observacoes"):
-                    st.caption(f"📝 {laudo['observacoes']}")
-                st.caption(f"Confiança: {laudo.get('confianca','—')}  ·  {res['timestamp']}")
-
-                st.divider()
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    fogo_edit = st.text_input("Confirmar / Corrigir ID Fogo", value=laudo.get("fogo", ""), key=f"fogo_{res['id']}")
-                with c2:
-                    status_edit = st.selectbox("Status Final", ["Aprovado", "Precisa Recapagem", "Sucata", "Revisão Pendente"], key=f"status_{res['id']}")
-                with c3:
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    if st.button(f"💾 Salvar Pneu #{res['id']}", key=f"save_{res['id']}"):
-                        res["fogo_manual"] = fogo_edit
-                        res["status_manual"] = status_edit
-                        st.success(f"Pneu #{res['id']} salvo · Fogo: {fogo_edit} · Status: {status_edit}")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.markdown(f"**ID Fogo**\n### {laudo.get('fogo','?')}")
+                c2.markdown(f"**Marca**\n#### {laudo.get('marca','—')}")
+                c3.markdown(f"**Sulco**\n#### {laudo.get('sulco','—')}")
+                c4.markdown(f"**Ação**\n{status_badge(laudo.get('acao', ''))}", unsafe_allow_html=True)
+                
+                if laudo.get("danos"): st.info(f"**Danos:** {laudo['danos']}")
+                if laudo.get("observacoes"): st.caption(f"📝 {laudo['observacoes']}")
 
         st.divider()
-        st.subheader("📥 Exportar Relatório")
-        if st.button("Gerar CSV"):
-            rows = []
-            for res in st.session_state.results:
-                l = res["laudo"]
-                rows.append({
-                    "Pneu ID": res["id"],
-                    "ID Fogo (IA)": l.get("fogo", ""),
-                    "ID Fogo (Confirmado)": res.get("fogo_manual", ""),
-                    "Marca": l.get("marca", ""),
-                    "Sulco": l.get("sulco", ""),
-                    "Danos": l.get("danos", ""),
-                    "Ação Recomendada": l.get("acao", ""),
-                    "Confiança": l.get("confianca", ""),
-                    "Status Final": res.get("status_manual", ""),
-                    "Observações": l.get("observacoes", ""),
-                    "Arquivos": ", ".join(res["files"]),
-                    "Timestamp": res["timestamp"],
-                })
-            df = pd.DataFrame(rows)
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Baixar CSV",
-                data=csv,
-                file_name=f"relatorio_pneus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-            )
+        if st.button("📥 Gerar Relatório CSV"):
+            df = pd.DataFrame([{**r["laudo"], "Pneu ID": r["id"], "Timestamp": r["timestamp"]} for r in st.session_state.results])
+            st.download_button("Baixar CSV", df.to_csv(index=False).encode('utf-8'), "relatorio.csv", "text/csv")
