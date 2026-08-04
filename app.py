@@ -5,6 +5,8 @@ import json
 import pandas as pd
 from datetime import datetime
 import requests
+from io import BytesIO
+from PIL import Image
 
 # ── Configuração da página ──────────────────────────────────────────────────
 st.set_page_config(
@@ -81,11 +83,31 @@ modo_analise = st.selectbox(
 # ── Funções ───────────────────────────────────────────────────────────────────
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-# Atualizado para o modelo 90B que é o atual suportado para visão
 MODEL_NAME = "llama-3.2-90b-vision-preview"
 
+def optimize_image(file_bytes: bytes, max_size=(800, 800)) -> bytes:
+    """Redimensiona e comprime a imagem para reduzir o tamanho do payload."""
+    try:
+        img = Image.open(BytesIO(file_bytes))
+        # Converte para RGB se necessário (ex: PNG com transparência)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        
+        # Redimensiona mantendo o aspect ratio
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        
+        # Salva de volta para bytes com compressão JPEG
+        buffer = BytesIO()
+        img.save(buffer, format="JPEG", quality=70, optimize=True)
+        return buffer.getvalue()
+    except Exception as e:
+        st.error(f"Erro ao otimizar imagem: {e}")
+        return file_bytes
+
 def image_to_base64(file_bytes: bytes) -> str:
-    return base64.standard_b64encode(file_bytes).decode("utf-8")
+    # Otimiza antes de converter para base64
+    optimized_bytes = optimize_image(file_bytes)
+    return base64.standard_b64encode(optimized_bytes).decode("utf-8")
 
 def groq_request(api_key: str, messages: list, max_tokens: int = 500) -> str:
     """Faz uma chamada à API do Groq (Llama 3.2 Vision) usando requests."""
@@ -107,13 +129,8 @@ def groq_request(api_key: str, messages: list, max_tokens: int = 500) -> str:
     try:
         response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=60)
         
-        if response.status_code == 403:
-            raise Exception("Erro 403 (Forbidden): Acesso negado. Verifique se sua chave da API é válida.")
-        elif response.status_code == 400:
-            error_data = response.json()
-            if "model_decommissioned" in str(error_data):
-                raise Exception("O modelo de IA foi atualizado pelo provedor. Por favor, contate o suporte.")
-            raise Exception(f"Erro 400: {response.text}")
+        if response.status_code == 413:
+            raise Exception("Erro 413: As imagens ainda são muito grandes. Tente enviar menos fotos por pneu.")
         elif response.status_code != 200:
             raise Exception(f"Erro na API do Groq ({response.status_code}): {response.text}")
             
@@ -143,7 +160,7 @@ def classificar_fogo(api_key: str, img_bytes: bytes, media_type: str) -> bool:
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:{media_type};base64,{base64_image}"
+                        "url": f"data:image/jpeg;base64,{base64_image}"
                     }
                 }
             ]
@@ -177,12 +194,20 @@ Responda SOMENTE com o JSON abaixo (sem markdown, sem texto extra):
         }
     ]
     
-    for item in block:
+    # Se houver muitas fotos, limitamos para não estourar o limite da API
+    # Priorizamos a primeira (Fogo) e as últimas (danos)
+    max_images = 5
+    if len(block) > max_images:
+        selected_block = [block[0]] + block[-(max_images-1):]
+    else:
+        selected_block = block
+
+    for item in selected_block:
         base64_image = image_to_base64(item["bytes"])
         content.append({
             "type": "image_url",
             "image_url": {
-                "url": f"data:{item['media_type']};base64,{base64_image}"
+                "url": f"data:image/jpeg;base64,{base64_image}"
             }
         })
 
@@ -311,7 +336,7 @@ if uploaded_files:
                 with col_marca:
                     st.markdown("**Marca**")
                     st.markdown(f"#### {laudo.get('marca','—')}")
-                with col_marca:
+                with col_sulco:
                     st.markdown("**Sulco**")
                     st.markdown(f"#### {laudo.get('sulco','—')}")
                 with col_acao:
