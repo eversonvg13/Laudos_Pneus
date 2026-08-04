@@ -5,9 +5,16 @@ from datetime import datetime
 import re
 import cv2
 import numpy as np
+import os
 
 try:
     import pytesseract
+    # Força o caminho padrão do Tesseract em ambientes Linux (Streamlit Cloud / Codespaces)
+    if os.path.exists('/usr/bin/tesseract'):
+        pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+    elif os.path.exists('/usr/local/bin/tesseract'):
+        pytesseract.pytesseract.tesseract_cmd = '/usr/local/bin/tesseract'
+        
     OCR_DISPONIVEL = True
 except ImportError:
     OCR_DISPONIVEL = False
@@ -19,7 +26,7 @@ st.set_page_config(
 )
 
 st.title("🛞 Gerador Automatizado de Laudos de Pneus")
-st.markdown("### Motor Universal com Depuração de OCR")
+st.markdown("### Motor Universal com Caminho do Tesseract Corrigido")
 
 arquivos_fotos = st.file_uploader(
     "📁 Selecione as fotos do pátio (Fogo e Danos):", 
@@ -87,8 +94,8 @@ def ler_numero_fogo_universal(uploaded_file):
         return "Desconhecido", str(e)
 
 if arquivos_fotos:
-    if st.button("🔄 Processar Lote com Diagnóstico", type="primary"):
-        with st.spinner("Analisando imagens..."):
+    if st.button("🔄 Processar Lote Corrigido", type="primary"):
+        with st.spinner("Analisando imagens e lendo os fogos..."):
             
             fotos_processadas = []
             for arquivo in arquivos_fotos:
@@ -159,11 +166,12 @@ if arquivos_fotos:
                                 with cols_dano[d_idx]:
                                     dano["arquivo"].seek(0)
                                     st.image(dano["arquivo"], width=120)
-                                    st.caption(f"OCR: {dano['fogo_id']}")
+                                    dano["caption_text"] = f"OCR: {dano['fogo_id']}"
+                                    st.caption(dano["caption_text"])
                                     dano["arquivo"].seek(0)
                         else:
                             st.info("Apenas foto âncora neste bloco.")
                             
-            st.success("✨ Processamento concluído com painel de diagnóstico!")
+            st.success("✨ Processamento concluído com o caminho do Tesseract ajustado!")
 else:
     st.info("💡 Suba as fotos para testar.")
