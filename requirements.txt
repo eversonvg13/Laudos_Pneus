@@ -10,3 +10,4 @@ httpx
 beautifulsoup4
 fpdf2
 pillow
+reportlab
