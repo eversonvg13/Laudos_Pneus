@@ -30,24 +30,25 @@ st.sidebar.markdown("Desenvolvido com Google Gemini Multimodal AI")
 api_key_input = st.sidebar.text_input("Chave da API Gemini (API Key)", type="password", value=os.environ.get("GEMINI_API_KEY", ""))
 
 st.sidebar.markdown("---")
-st.sidebar.info(
-    "**Instruções:**
-"
-    "1. Insira sua chave da API do Google Gemini acima (ou configure a variável de ambiente `GEMINI_API_KEY`).
-"
-    "2. Faça o upload de uma ou mais fotos de pneus.
-"
-    "3. Selecione o modo de análise desejado.
-"
-    "4. Clique em executar, revise os dados extraídos e exporte o relatório em CSV!"
-)
+st.sidebar.info("""
+**Instruções:**
+1. Insira sua chave da API do Google Gemini acima (ou configure a variável de ambiente `GEMINI_API_KEY`).
+2. Faça o upload de uma ou mais fotos de pneus.
+3. Selecione o modo de análise desejado.
+4. Clique em executar, revise os dados extraídos e exporte o relatório em CSV!
+""")
 
 # Cabeçalho Principal
 st.title("🛞 SMART-LOG: Inspeção e Inventário de Pneus por IA")
 st.markdown("Automatize a identificação do número de **Fogo**, análise de sulcos/desgaste e detecção de danos na carcaça usando visão computacional e Inteligência Artificial.")
 
-# Verificar chave da API
-api_key = api_key_input or st.secrets.get("GEMINI_API_KEY", "")
+# Verificar chave da API (prioriza input da barra lateral, depois os Secrets do Streamlit)
+api_key = api_key_input
+if not api_key:
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        api_key = ""
 
 # Uploader de arquivos
 uploaded_files = st.file_uploader(
@@ -74,7 +75,7 @@ if uploaded_files:
 
     if st.button("🚀 Executar Inspeção por IA em Todas as Imagens", type="primary"):
         if not api_key:
-            st.error("⚠️ Por favor, insira sua chave da API Gemini na barra lateral para executar a inspeção.")
+            st.error("⚠️ Por favor, insira sua chave da API Gemini na barra lateral ou configure nas Secrets para executar a inspeção.")
         else:
             try:
                 import google.generativeai as genai
@@ -96,9 +97,10 @@ if uploaded_files:
                         "data": bytes_dados
                     }
                     
-                    prompt = """
+                    prompt = f"""
                     Você é um inspetor especialista em inventário e manutenção de pneus para uma frota de logística (SMART-LOG). 
-                    Analise esta imagem de pneu cuidadosamente. 
+                    Analise esta imagem de pneu cuidadosamente. O modo de análise selecionado é: {modo_analise}.
+                    
                     Extraia os seguintes detalhes em um formato estruturado em português:
                     1. Fogo (Número de identificação do pneu pintado ou gravado na lateral/banda de rodagem). Se não estiver visível, estime ou coloque 'Desconhecido'.
                     2. Marca / Fabricante (ex: Michelin, Bridgestone, Pirelli, Firestone, Goodyear).
