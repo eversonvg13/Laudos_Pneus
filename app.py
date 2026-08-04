@@ -107,7 +107,7 @@ if uploaded_files:
                     try:
                         resp = model.generate_content([img_part, check_prompt])
                         resposta_texto = resp.text.upper()
-                        is_fogo = "TIPO: FOGO" in resposta_texto or ("FOGO" in resposta_texto and "DANO" NOT IN resposta_texto)
+                        is_fogo = "TIPO: FOGO" in resposta_texto or ("FOGO" in resposta_texto and "DANO" not in resposta_texto)
                     except Exception:
                         # Fallback seguro: se a primeira foto do lote ou a cada X fotos não classificar, assume Dano ou Fogo baseado na ordem
                         is_fogo = (idx == 0) # Garante que pelo menos a primeira começa um bloco se houver falha
@@ -150,7 +150,7 @@ if uploaded_files:
                     nomes_fotos = [item["name"] for item in block]
                     
                     prompt_completo = f"""
-                    Você é um inspetor especialista em inventário e manutenção de pneus para uma frota de logística (SMART-LOG). 
+                    Você é um inspetor especialista em inventário e manutenção de pneus para uma frota de logística. 
                     Estas {len(block)} imagens pertencem ao **mesmo pneu** (agrupadas cronologicamente a partir da foto âncora com o número de "Fogo" até as fotos seguintes de banda de rodagem/danos).
                     O modo de análise selecionado é: {modo_analise}.
                     
