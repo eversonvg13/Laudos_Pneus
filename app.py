@@ -168,6 +168,32 @@ def obter_modelo_estavel(genai):
     return "gemini-flash-latest"
 
 
+def buscar_dados_relatorio(fogo_lido, df):
+    """
+    Busca a linha da tabela do relatório correspondente ao Fogo lido na foto.
+    Compara normalizando zeros à esquerda (ex: '31712' == '0031712'),
+    já que a IA pode ler o número sem os zeros de preenchimento.
+    Retorna um dict com os campos fixos, ou None se não encontrar.
+    """
+    if df is None or df.empty or not fogo_lido:
+        return None
+
+    fogo_lido = str(fogo_lido).strip()
+    fogo_lido_norm = fogo_lido.lstrip("0") or "0"
+
+    fogos_tabela = df["FOGO"].astype(str).str.strip()
+
+    # 1. Tenta correspondência exata
+    match = df[fogos_tabela == fogo_lido]
+    if match.empty:
+        # 2. Tenta correspondência ignorando zeros à esquerda
+        match = df[fogos_tabela.str.lstrip("0").replace("", "0") == fogo_lido_norm]
+
+    if match.empty:
+        return None
+    return match.iloc[0].to_dict()
+
+
 def extrair_json_da_resposta(texto):
     """Extrai o array JSON da resposta da IA, mesmo se vier com texto/markdown ao redor."""
     texto_limpo = texto.strip()
@@ -403,28 +429,16 @@ if uploaded_files:
 
                 sorted_files = sorted(uploaded_files, key=lambda f: f.name)
 
-                dados_validos = st.session_state.dados_relatorio.fillna("").astype(str)
-                dados_validos = dados_validos[dados_validos["FOGO"].str.strip() != ""]
-                if not dados_validos.empty:
-                    tabela_relatorio_txt = dados_validos.to_csv(index=False, sep="|")
-                else:
-                    tabela_relatorio_txt = "(Nenhum dado de relatório disponível.)"
-
                 prompt_instrucoes = f"""
                 Você é um inspetor especialista em inventário de pneus de frota (SMART-LOG).
                 Abaixo estão {len(sorted_files)} fotos ordenadas cronologicamente.
-
-                Você também recebeu uma TABELA DE DADOS DO RELATÓRIO, extraída do sistema da frota,
-                no formato CSV separado por "|", com uma linha por pneu:
-
-                {tabela_relatorio_txt}
 
                 Sua tarefa:
                 1. Analise todas as imagens e agrupe-as por pneu individual. Cada novo pneu começa com a
                    foto da lateral contendo o número de 'Fogo' (identificação pintada em giz/tinta, ex: 32813),
                    seguida das fotos de banda de rodagem/sulco/danos daquele pneu até a próxima foto de 'Fogo'.
-                2. Para cada pneu, identifique o número de Fogo na foto e procure a linha correspondente na
-                   TABELA DE DADOS DO RELATÓRIO (casando pelo campo FOGO).
+                2. Para cada pneu, leia o número de Fogo exatamente como aparece na foto (todos os dígitos,
+                   incluindo zeros à esquerda se estiverem visíveis).
                 3. Modo de análise solicitado: {modo_analise}.
 
                 Responda SOMENTE com um array JSON válido (nada de texto antes ou depois, nada de markdown),
@@ -432,25 +446,17 @@ if uploaded_files:
 
                 [
                   {{
-                    "fogo": "string",
-                    "pos": "string (da tabela, ou vazio)",
-                    "veiculo": "string (da tabela, ou vazio)",
-                    "medida": "string (da tabela, ou vazio)",
-                    "retirada": "string (da tabela, ou vazio)",
-                    "local": "string (da tabela, ou vazio)",
-                    "km_pos": "string (da tabela, ou vazio)",
-                    "km_total": "string (da tabela, ou vazio)",
+                    "fogo": "string (número lido na foto)",
                     "marca": "string (observado na foto)",
                     "sulco": "string (observado na foto)",
                     "danos": "string (observado na foto)",
                     "acao_recomendada": "string",
-                    "confianca": "Alta | Média | Baixa",
-                    "fogo_localizado_na_planilha": true ou false
+                    "confianca": "Alta | Média | Baixa"
                   }}
                 ]
 
-                Se o Fogo da foto não tiver linha correspondente na tabela, preencha os campos da tabela com
-                string vazia e defina "fogo_localizado_na_planilha" como false.
+                NÃO invente dados de placa, posição, quilometragem ou datas — essas informações não vêm
+                das fotos e serão preenchidas separadamente a partir do relatório da frota.
                 """
 
                 conteudo_requisicao = []
@@ -466,7 +472,35 @@ if uploaded_files:
                 pneus_estruturados = None
                 erro_parse = None
                 try:
-                    pneus_estruturados = extrair_json_da_resposta(resposta_ia.text)
+                    pneus_ia = extrair_json_da_resposta(resposta_ia.text)
+
+                    # Cruzamento determinístico: para cada pneu identificado pela IA na foto,
+                    # busca os dados fixos (POS, VEICULO, MEDIDA, RETIRADA, LOCAL, KM/POS, KM TOTAL)
+                    # por correspondência EXATA do Fogo na tabela do relatório — a IA não participa
+                    # dessa parte, evitando que ela erre ou deixe campos em branco.
+                    tabela_df = st.session_state.dados_relatorio
+                    pneus_estruturados = []
+                    for item in pneus_ia:
+                        fogo_lido = str(item.get("fogo", "")).strip()
+                        dados_tabela = buscar_dados_relatorio(fogo_lido, tabela_df)
+
+                        pneu = {
+                            "fogo": fogo_lido,
+                            "pos": dados_tabela.get("POS", "") if dados_tabela else "",
+                            "veiculo": dados_tabela.get("VEICULO", "") if dados_tabela else "",
+                            "medida": dados_tabela.get("MEDIDA", "") if dados_tabela else "",
+                            "retirada": dados_tabela.get("RETIRADA", "") if dados_tabela else "",
+                            "local": dados_tabela.get("LOCAL", "") if dados_tabela else "",
+                            "km_pos": dados_tabela.get("KM/POS", "") if dados_tabela else "",
+                            "km_total": dados_tabela.get("KM TOTAL", "") if dados_tabela else "",
+                            "marca": item.get("marca", ""),
+                            "sulco": item.get("sulco", ""),
+                            "danos": item.get("danos", ""),
+                            "acao_recomendada": item.get("acao_recomendada", ""),
+                            "confianca": item.get("confianca", ""),
+                            "fogo_localizado_na_planilha": dados_tabela is not None,
+                        }
+                        pneus_estruturados.append(pneu)
                 except Exception as e:
                     erro_parse = str(e)
 
