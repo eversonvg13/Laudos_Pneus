@@ -5,6 +5,8 @@ import json
 import pandas as pd
 from datetime import datetime
 import requests
+import time
+import re
 from io import BytesIO
 from PIL import Image
 
@@ -45,7 +47,7 @@ with st.sidebar:
         help="Obtenha GRATUITAMENTE em: console.groq.com/keys"
     )
 
-    st.info("🆓 O Groq oferece um nível gratuito generoso e extremamente rápido para o modelo Qwen 3.6 27B Vision.")
+    st.info("🆓 Esta versão inclui **espera inteligente** para processar lotes grandes sem estourar o limite da API gratuita.")
 
     st.divider()
     st.markdown("""
@@ -53,9 +55,8 @@ with st.sidebar:
 1. Cole sua chave gratuita do Groq acima.
 2. Faça upload do **lote completo** de fotos.
 3. O sistema ordena cronologicamente pelo nome do arquivo.
-4. A IA identifica as **fotos de Fogo** (lateral com número) como âncoras.
-5. As fotos seguintes são agrupadas como danos daquele pneu.
-6. Um laudo consolidado é gerado para cada pneu, analisando todas as fotos individualmente.
+4. A IA identifica as **fotos de Fogo** como âncoras.
+5. Um laudo consolidado é gerado para cada pneu.
 """)
 
 # ── Cabeçalho ────────────────────────────────────────────────────────────────
@@ -83,7 +84,6 @@ modo_analise = st.selectbox(
 # ── Funções ───────────────────────────────────────────────────────────────────
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-# Atualizado para o modelo Qwen 3.6 27B que é o atual suportado para visão
 MODEL_NAME = "qwen/qwen3.6-27b"
 
 def optimize_image(file_bytes: bytes, max_size=(1024, 1024)) -> bytes:
@@ -94,9 +94,9 @@ def optimize_image(file_bytes: bytes, max_size=(1024, 1024)) -> bytes:
             img = img.convert("RGB")
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
         buffer = BytesIO()
-        img.save(buffer, format="JPEG", quality=80, optimize=True)
+        img.save(buffer, format="JPEG", quality=75, optimize=True)
         return buffer.getvalue()
-    except Exception as e:
+    except Exception:
         return file_bytes
 
 def image_to_base64(file_bytes: bytes) -> str:
@@ -104,11 +104,11 @@ def image_to_base64(file_bytes: bytes) -> str:
     return base64.standard_b64encode(optimized_bytes).decode("utf-8")
 
 def groq_request(api_key: str, messages: list, max_tokens: int = 500) -> str:
-    """Faz uma chamada à API do Groq usando requests."""
+    """Faz uma chamada à API do Groq com lógica de retry para lidar com Rate Limits."""
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0"
     }
     payload = {
         "model": MODEL_NAME,
@@ -118,14 +118,39 @@ def groq_request(api_key: str, messages: list, max_tokens: int = 500) -> str:
         "top_p": 1,
         "stream": False
     }
-    try:
-        response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=60)
-        if response.status_code != 200:
+    
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return data["choices"][0]["message"]["content"].strip()
+            
+            if response.status_code == 429:
+                # Rate limit atingido. Tenta extrair o tempo de espera da mensagem.
+                error_msg = response.text
+                wait_time = 2.0 # Tempo padrão
+                
+                # Procura por "try again in X.XXs" na mensagem de erro
+                match = re.search(r"try again in (\d+\.?\d*)s", error_msg)
+                if match:
+                    wait_time = float(match.group(1)) + 0.5 # Adiciona margem de segurança
+                
+                if attempt < max_retries - 1:
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise Exception(f"Limite de taxa excedido após várias tentativas. Espere um minuto e tente novamente.")
+            
             raise Exception(f"Erro na API ({response.status_code}): {response.text}")
-        data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        raise Exception(f"Falha na comunicação: {str(e)}")
+            
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            raise Exception(f"Falha na comunicação: {str(e)}")
 
 def classificar_fogo(api_key: str, img_bytes: bytes) -> bool:
     """Retorna True se a foto for de FOGO."""
@@ -139,6 +164,8 @@ def classificar_fogo(api_key: str, img_bytes: bytes) -> bool:
             ]
         }
     ]
+    # Adicionamos um pequeno delay para evitar TPM excessivo
+    time.sleep(0.5)
     answer = groq_request(api_key, messages, max_tokens=10).upper()
     return "FOGO" in answer
 
@@ -154,7 +181,9 @@ def analisar_foto_individual(api_key: str, img_bytes: bytes) -> str:
             ]
         }
     ]
-    return groq_request(api_key, messages, max_tokens=150)
+    # Pequeno delay entre fotos
+    time.sleep(0.8)
+    return groq_request(api_key, messages, max_tokens=100)
 
 def consolidar_laudo(api_key: str, descricoes: list, modo: str) -> str:
     """Gera o laudo JSON final baseado nas descrições de todas as fotos do bloco."""
@@ -177,11 +206,11 @@ Responda SOMENTE o JSON:
 }}"""
     
     messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-    return groq_request(api_key, messages, max_tokens=500)
+    time.sleep(1.0)
+    return groq_request(api_key, messages, max_tokens=400)
 
 def parse_laudo(raw: str) -> dict:
     try:
-        # Limpeza para garantir que apenas o JSON seja processado
         clean = raw.strip()
         if "```json" in clean:
             clean = clean.split("```json")[1].split("```")[0].strip()
@@ -223,7 +252,8 @@ if uploaded_files:
             raw_bytes = f.read()
             try:
                 is_fogo = classificar_fogo(api_key, raw_bytes)
-            except:
+            except Exception as e:
+                st.warning(f"Erro ao classificar {f.name}: {e}")
                 is_fogo = False
             
             item = {"name": f.name, "bytes": raw_bytes, "is_fogo": is_fogo}
@@ -245,7 +275,7 @@ if uploaded_files:
                     desc = analisar_foto_individual(api_key, item["bytes"])
                     descricoes.append(f"Foto {img_idx+1} ({item['name']}): {desc}")
                 except Exception as e:
-                    descricoes.append(f"Foto {img_idx+1}: Erro na análise individual.")
+                    descricoes.append(f"Foto {img_idx+1}: Erro na análise individual: {e}")
             
             try:
                 raw_laudo = consolidar_laudo(api_key, descricoes, modo_analise)
