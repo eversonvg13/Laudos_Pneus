@@ -155,8 +155,6 @@ if arquivos_fotos:
                         st.markdown(f"**🔍 Danos Vinculados ({len(bloco['danos'])} imagens):**")
                         if bloco["danos"]:
                             cols_dano = st.columns(len(bloco['danos']))
-                            for d_idx, dano in esse_dano = bloco["danos"][d_idx]: # correção de loop
-                            # corrigindo a exibição dos danos com depuração individual
                             for d_idx, dano in enumerate(bloco["danos"]):
                                 with cols_dano[d_idx]:
                                     dano["arquivo"].seek(0)
