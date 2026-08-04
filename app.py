@@ -4,7 +4,7 @@ import base64
 import json
 import pandas as pd
 from datetime import datetime
-import urllib.request
+import requests  # Trocando urllib por requests para melhor compatibilidade
 
 # ── Configuração da página ──────────────────────────────────────────────────
 st.set_page_config(
@@ -34,25 +34,21 @@ with st.sidebar:
     st.caption("Powered by Groq (Llama 3.2 Vision) · **100% GRATUITO**")
 
     # Tenta obter a chave da API de st.secrets, depois de variáveis de ambiente
-    api_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+    api_key_stored = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
 
-    api_key_input = st.text_input(
+    api_key = st.text_input(
         "Chave da API Groq (gratuita)",
         type="password",
-        value=api_key,
-        help="Obtenha GRATUITAMENTE em: console.groq.com/keys. A chave será salva automaticamente se você usar st.secrets."
+        value=api_key_stored,
+        help="Obtenha GRATUITAMENTE em: console.groq.com/keys"
     )
-    
-    # Atualiza a variável api_key se o usuário digitou algo no input
-    if api_key_input and api_key_input != api_key:
-        api_key = api_key_input
 
     st.info("🆓 O Groq oferece um nível gratuito generoso e extremamente rápido para o modelo Llama 3.2 Vision.")
 
     st.divider()
     st.markdown("""
 **Como funciona:**
-1. Cole sua chave gratuita do Groq acima (ela pode ser salva via `st.secrets`).
+1. Cole sua chave gratuita do Groq acima.
 2. Faça upload do **lote completo** de fotos.
 3. O sistema ordena cronologicamente pelo nome do arquivo.
 4. A IA identifica as **fotos de Fogo** (lateral com número) como âncoras.
@@ -91,33 +87,34 @@ def image_to_base64(file_bytes: bytes) -> str:
     return base64.standard_b64encode(file_bytes).decode("utf-8")
 
 def groq_request(api_key: str, messages: list, max_tokens: int = 500) -> str:
-    """Faz uma chamada à API do Groq (Llama 3.2 Vision)."""
+    """Faz uma chamada à API do Groq (Llama 3.2 Vision) usando requests."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
     payload = {
         "model": MODEL_NAME,
         "messages": messages,
         "temperature": 0.1,
         "max_tokens": max_tokens,
         "top_p": 1,
-        "stream": False,
-        "stop": None
+        "stream": False
     }
     
-    req = urllib.request.Request(
-        GROQ_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        },
-        method="POST",
-    )
-    
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code == 403:
+            raise Exception("Erro 403 (Forbidden): Acesso negado. Verifique se sua chave da API é válida e se o modelo Llama 3.2 Vision está disponível na sua conta.")
+        elif response.status_code != 200:
+            raise Exception(f"Erro na API do Groq ({response.status_code}): {response.text}")
+            
+        data = response.json()
         return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        raise Exception(f"Erro na API do Groq: {str(e)}")
+        raise Exception(f"Falha na comunicação: {str(e)}")
 
 def classificar_fogo(api_key: str, img_bytes: bytes, media_type: str) -> bool:
     """Retorna True se a foto for de FOGO (âncora de novo pneu)."""
@@ -131,8 +128,7 @@ def classificar_fogo(api_key: str, img_bytes: bytes, media_type: str) -> bool:
                     "text": (
                         "Esta é uma foto de pneu de caminhão. "
                         "Verifique se ela mostra a LATERAL do pneu com um número de identificação "
-                        "pintado ou gravado (chamado \'número de Fogo\', geralmente em tinta amarela ou branca, "
-                        "exemplos: 32813, 33633, 33830, 30039). "
+                        "pintado ou gravado (chamado 'número de Fogo', geralmente em tinta amarela ou branca). "
                         "Responda APENAS com a palavra FOGO se for a lateral com o número de identificação, "
                         "ou DANO se for foto de banda de rodagem, sulco, desgaste ou avaria. "
                         "Responda somente FOGO ou DANO, sem mais nada."
@@ -180,7 +176,7 @@ Responda SOMENTE com o JSON abaixo (sem markdown, sem texto extra):
         content.append({
             "type": "image_url",
             "image_url": {
-                "url": f"data:{item["media_type"]};base64,{base64_image}"
+                "url": f"data:{item['media_type']};base64,{base64_image}"
             }
         })
 
@@ -221,7 +217,7 @@ if uploaded_files:
 
     if st.button("🚀 Executar Varredura Inteligente", type="primary"):
         if not api_key:
-            st.error("⚠️ Insira sua chave da API Groq na barra lateral ou configure-a em `.streamlit/secrets.toml`. Obtenha gratuitamente em console.groq.com/keys")
+            st.error("⚠️ Insira sua chave da API Groq na barra lateral. Obtenha gratuitamente em console.groq.com/keys")
             st.stop()
 
         sorted_files = sorted(uploaded_files, key=lambda f: f.name)
@@ -239,7 +235,7 @@ if uploaded_files:
             try:
                 is_fogo = classificar_fogo(api_key, raw_bytes, media_type)
             except Exception as e:
-                st.warning(f"Erro ao classificar \'{f.name}\': {e}. Assumindo DANO.")
+                st.warning(f"Erro ao classificar '{f.name}': {e}. Assumindo DANO.")
                 is_fogo = False
 
             classificadas.append({"name": f.name, "bytes": raw_bytes, "media_type": media_type, "is_fogo": is_fogo})
@@ -333,7 +329,7 @@ if uploaded_files:
                     if st.button(f"💾 Salvar Pneu #{res['id']}", key=f"save_{res['id']}"):
                         res["fogo_manual"] = fogo_edit
                         res["status_manual"] = status_edit
-                        st.success(f"Pneu #{res['id']} salvo · Fogo: {fogo_edit} · Status: {status_edit}")
+                        st.success(f"Pneu #{res['id']} saved · Fogo: {fogo_edit} · Status: {status_edit}")
 
         st.divider()
         st.subheader("📥 Exportar Relatório")
