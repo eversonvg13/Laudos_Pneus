@@ -7,3 +7,6 @@ ultralytics
 google-generativeai
 pandas
 httpx
+beautifulsoup4
+fpdf2
+pillow
