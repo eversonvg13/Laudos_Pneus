@@ -1,22 +1,17 @@
-import streamlit as st
 import os
-import io
-import re
-import json
-import unicodedata
 from datetime import datetime
-
 import pandas as pd
-from PIL import Image
-from bs4 import BeautifulSoup
+import streamlit as st
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+# Importações dos nossos módulos locais
+from parser import parse_relatorio_html, CAMPOS_FIXOS
+from ai_helper import (
+    comprimir_imagem,
+    obter_modelo_estavel,
+    buscar_dados_relatorio,
+    extrair_json_da_resposta,
 )
+from pdf_generator import gerar_pdf_laudo, gerar_pdf_fallback
 
 # ==============================================================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -37,292 +32,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Campos fixos do laudo, na ordem exigida
-CAMPOS_FIXOS = ["FOGO", "POS", "VEICULO", "MEDIDA", "RETIRADA", "LOCAL", "KM/POS", "KM TOTAL"]
-
-# ==============================================================================
-# PARSER DO RELATÓRIO HTML (formato RDprint e Tabela Convencional)
-# ==============================================================================
-
-# Mapeamento de posição (left em px) -> nome da coluna
-COLUNAS_REFERENCIA = [
-    (0, "VEICULO"), (45, "POS"), (68, "FOGO"), (113, "MARCA"), (232, "MEDIDA"),
-    (350, "E"), (362, "RE"), (379, "CO"), (396, "V"), (407, "COLOCADO"),
-    (469, "RETIRADA"), (531, "DIAS"), (571, "MOTIVO"), (655, "LOCAL"),
-    (695, "KM/POS"), (751, "VIDA1"), (814, "RECAP1"), (876, "RECAP2"),
-    (938, "RECAP3"), (1000, "KM TOTAL"), (1085, "RECAPADOR_SERVICO_VALOR"),
-]
-# Ampliado para 30px para absorver deslocamentos do RDprint nas colunas finais
-TOLERANCIA_PX = 30
-
-
-def _left_para_coluna(left_px):
-    melhor = min(COLUNAS_REFERENCIA, key=lambda c: abs(c[0] - left_px))
-    if abs(melhor[0] - left_px) <= TOLERANCIA_PX:
-        return melhor[1]
-    return None
-
-
-def parse_relatorio_html(file_bytes):
-    """
-    Lê o relatório HTML (RDprint por divs ou Tabela HTML simples) 
-    e extrai os campos de cada pneu.
-    """
-    soup = BeautifulSoup(file_bytes, "html.parser")
-    paginas = soup.find_all("div", class_="pagina")
-
-    registros = []
-
-    # MÉTODO 1: Processamento por Divs do RDprint (posições em px)
-    if paginas:
-        for pagina in paginas:
-            linhas = {}
-            for div in pagina.find_all("div", recursive=False):
-                style = div.get("style", "")
-                m_top = re.search(r"top:(-?\d+)px", style)
-                m_left = re.search(r"left:(-?\d+)px", style)
-                if not m_top or not m_left:
-                    continue
-                top = int(m_top.group(1))
-                left = int(m_left.group(1))
-                texto = div.get_text()
-                linhas.setdefault(top, []).append((left, texto))
-
-            for top, campos in linhas.items():
-                if len(campos) < 10:  # Ajustado de 15 para evitar ignorar linhas curtas
-                    continue
-                campos.sort(key=lambda c: c[0])
-                registro = {}
-                for left, texto in campos:
-                    coluna = _left_para_coluna(left)
-                    if coluna and coluna not in registro:
-                        registro[coluna] = texto.strip()
-
-                veiculo = registro.get("VEICULO", "")
-                fogo = registro.get("FOGO", "")
-                if veiculo.isdigit() and fogo.isdigit():
-                    registros.append({c: registro.get(c, "") for c in CAMPOS_FIXOS})
-
-    # MÉTODO 2: Fallback para Tabelas HTML padrão (<tr> / <td>)
-    if not registros:
-        linhas_tr = soup.find_all("tr")
-        veiculo_atual = ""
-        for tr in linhas_tr:
-            cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-            if len(cols) >= 8:
-                if cols[0] and cols[0].isdigit():
-                    veiculo_atual = cols[0]
-                fogo = cols[2]
-                if fogo.isdigit():
-                    registros.append({
-                        "VEICULO": veiculo_atual,
-                        "POS": cols[1],
-                        "FOGO": cols[2],
-                        "MEDIDA": cols[3],
-                        "RETIRADA": cols[4],
-                        "LOCAL": cols[5],
-                        "KM/POS": cols[6],
-                        "KM TOTAL": cols[7]
-                    })
-
-    df = pd.DataFrame(registros, columns=CAMPOS_FIXOS)
-    if df.empty:
-        return df
-
-    # Ordena pela data de retirada mais recente e remove duplicadas do mesmo fogo
-    df["_retirada_dt"] = pd.to_datetime(df["RETIRADA"], format="%d/%m/%Y", errors="coerce")
-    df = df.sort_values("_retirada_dt", ascending=False, na_position="last")
-    df = df.drop_duplicates(subset="FOGO", keep="first")
-    df = df.drop(columns="_retirada_dt").sort_values("FOGO").reset_index(drop=True)
-    return df
-
-
-# ==============================================================================
-# UTILITÁRIOS DE IMAGEM E MODELO GEMINI
-# ==============================================================================
-
-def comprimir_imagem(file_bytes, max_dim=1024, qualidade=80):
-    img = Image.open(io.BytesIO(file_bytes))
-    img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-    if img.mode in ("RGBA", "P"):
-        img = img.convert("RGB")
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=qualidade, optimize=True)
-    return buffer.getvalue()
-
-
-def obter_modelo_estavel(genai):
-    modelos_homologados = [
-        "gemini-flash-latest",
-        "gemini-3.5-flash",
-        "gemini-3.6-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash-lite",
-    ]
-    prefixos_descontinuados = ("gemini-1.", "gemini-2.0", "gemini-2.5")
-
-    try:
-        modelos_disponiveis = [
-            m.name.replace('models/', '')
-            for m in genai.list_models()
-            if 'generateContent' in m.supported_generation_methods
-        ]
-        modelos_validos = [m for m in modelos_disponiveis if not m.startswith(prefixos_descontinuados)]
-
-        for h in modelos_homologados:
-            if h in modelos_validos:
-                return h
-        for m in modelos_validos:
-            if 'flash' in m:
-                return m
-        if modelos_validos:
-            return modelos_validos[0]
-    except Exception:
-        pass
-
-    return "gemini-flash-latest"
-
-
-def buscar_dados_relatorio(fogo_lido, df):
-    if df is None or df.empty or not fogo_lido:
-        return None
-
-    fogo_lido = str(fogo_lido).strip()
-    fogo_lido_norm = fogo_lido.lstrip("0") or "0"
-
-    fogos_tabela = df["FOGO"].astype(str).str.strip()
-
-    match = df[fogos_tabela == fogo_lido]
-    if match.empty:
-        match = df[fogos_tabela.str.lstrip("0").replace("", "0") == fogo_lido_norm]
-
-    if match.empty:
-        return None
-    return match.iloc[0].to_dict()
-
-
-def extrair_json_da_resposta(texto):
-    texto_limpo = texto.strip()
-    texto_limpo = re.sub(r"^```json", "", texto_limpo.strip())
-    texto_limpo = re.sub(r"^```", "", texto_limpo.strip())
-    texto_limpo = re.sub(r"```$", "", texto_limpo.strip())
-
-    inicio = texto_limpo.find("[")
-    fim = texto_limpo.rfind("]")
-    if inicio == -1 or fim == -1:
-        raise ValueError("Nenhum array JSON encontrado na resposta da IA.")
-
-    return json.loads(texto_limpo[inicio:fim + 1])
-
-
-# ==============================================================================
-# GERAÇÃO DO LAUDO EM PDF
-# ==============================================================================
-
-def gerar_pdf_laudo(pneus, timestamp_str):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=A4,
-        topMargin=1.5 * cm, bottomMargin=1.5 * cm,
-        leftMargin=1.5 * cm, rightMargin=1.5 * cm
-    )
-
-    styles = getSampleStyleSheet()
-    titulo_style = ParagraphStyle("TituloLaudo", parent=styles["Title"], fontSize=16)
-    subtitulo_style = ParagraphStyle("SubtituloLaudo", parent=styles["Normal"], fontSize=9, textColor=colors.grey)
-    secao_style = ParagraphStyle("SecaoPneu", parent=styles["Heading2"], fontSize=13, spaceBefore=6)
-    label_style = ParagraphStyle("Label", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#334155"))
-    alerta_style = ParagraphStyle("Alerta", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#b91c1c"))
-
-    story = []
-    story.append(Paragraph("🛞 SMART-LOG — Laudo Técnico de Inspeção de Pneus", titulo_style))
-    story.append(Paragraph(f"Gerado em: {timestamp_str}  |  Total de pneus no laudo: {len(pneus)}", subtitulo_style))
-    story.append(Spacer(1, 0.6 * cm))
-
-    for i, pneu in enumerate(pneus, start=1):
-        if i > 1:
-            story.append(Spacer(1, 0.4 * cm))
-
-        fogo = pneu.get("fogo", "N/A")
-        story.append(Paragraph(f"PNEU {i} — FOGO {fogo}", secao_style))
-
-        if pneu.get("fogo_localizado_na_planilha") is False:
-            story.append(Paragraph(
-                "⚠ Este número de Fogo foi identificado na foto, mas NÃO foi encontrado no relatório enviado. "
-                "Dados fixos abaixo podem estar incompletos.",
-                alerta_style
-            ))
-
-        dados_fixos = [
-            ["FOGO", pneu.get("fogo", "")],
-            ["POS", pneu.get("pos", "")],
-            ["VEICULO", pneu.get("veiculo", "")],
-            ["MEDIDA", pneu.get("medida", "")],
-            ["RETIRADA", pneu.get("retirada", "")],
-            ["LOCAL", pneu.get("local", "")],
-            ["KM/POS", pneu.get("km_pos", "")],
-            ["KM TOTAL", pneu.get("km_total", "")],
-        ]
-        tabela_fixa = Table(dados_fixos, colWidths=[3.5 * cm, 13.5 * cm])
-        tabela_fixa.setStyle(TableStyle([
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#eff6ff")),
-            ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#1e3a8a")),
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
-        story.append(tabela_fixa)
-        story.append(Spacer(1, 0.25 * cm))
-
-        analise = [
-            ["Marca/Fabricante", pneu.get("marca", "")],
-            ["Condição do Sulco", pneu.get("sulco", "")],
-            ["Danos/Anomalias Detectadas", pneu.get("danos", "")],
-            ["Ação Recomendada", pneu.get("acao_recomendada", "")],
-            ["Confiança da Leitura", pneu.get("confianca", "")],
-        ]
-        tabela_analise = Table(
-            [[Paragraph(f"<b>{campo}</b>", label_style), Paragraph(str(valor), styles["Normal"])] for campo, valor in analise],
-            colWidths=[4.5 * cm, 12.5 * cm]
-        )
-        tabela_analise.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ]))
-        story.append(tabela_analise)
-
-        if i < len(pneus) and i % 3 == 0:
-            story.append(PageBreak())
-
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
-def gerar_pdf_fallback(texto_bruto, timestamp_str):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
-                            leftMargin=1.5 * cm, rightMargin=1.5 * cm)
-    styles = getSampleStyleSheet()
-    story = [
-        Paragraph("🛞 SMART-LOG — Laudo Técnico de Inspeção de Pneus", styles["Title"]),
-        Paragraph(f"Gerado em: {timestamp_str}", styles["Normal"]),
-        Spacer(1, 0.5 * cm),
-    ]
-    for linha in texto_bruto.split("\n"):
-        story.append(Paragraph(linha.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") or "&nbsp;", styles["Normal"]))
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
 # ==============================================================================
 # BARRA LATERAL
 # ==============================================================================
@@ -330,19 +39,16 @@ st.sidebar.title("🛞 SMART-LOG IA")
 st.sidebar.markdown("### Inspetor Inteligente de Pneus")
 api_key_input = st.sidebar.text_input("Chave da API Gemini", type="password", value=os.environ.get("GEMINI_API_KEY", ""))
 st.sidebar.markdown("---")
-st.sidebar.info("Fotos comprimidas automaticamente. Modelo selecionado dinamicamente entre as versões estáveis da família Gemini 3.x.")
+st.sidebar.info("Fotos comprimidas automaticamente. Modelo selecionado dinamicamente entre as versões estáveis do Gemini 3.x.")
 
 api_key = api_key_input or st.secrets.get("GEMINI_API_KEY", "")
 
 # ==============================================================================
-# CABEÇALHO
+# CABEÇALHO E PASSO 1 (RELATÓRIO)
 # ==============================================================================
 st.title("🛞 SMART-LOG: Inspeção de Pneus por IA")
 st.markdown("Fluxo: **1) Envie o relatório** → **2) Envie as fotos** → **3) Gere o laudo em PDF**.")
 
-# ==============================================================================
-# PASSO 1 — UPLOAD DO RELATÓRIO
-# ==============================================================================
 st.markdown("---")
 st.subheader("1️⃣ Relatório de Troca de Pneus (HTML)")
 
@@ -406,7 +112,7 @@ modo_analise = st.selectbox(
 )
 
 # ==============================================================================
-# PASSO 3 — EXECUÇÃO E LAUDO
+# PASSO 3 — EXECUÇÃO E EXIBIÇÃO
 # ==============================================================================
 if uploaded_files:
     st.markdown("---")
@@ -431,7 +137,6 @@ if uploaded_files:
                 texto_status.text(f"Conectado ao modelo: {nome_modelo_ativo}. Comprimindo lote de fotos...")
 
                 model = genai.GenerativeModel(nome_modelo_ativo)
-
                 sorted_files = sorted(uploaded_files, key=lambda f: f.name)
 
                 prompt_instrucoes = f"""
@@ -478,7 +183,6 @@ if uploaded_files:
                 erro_parse = None
                 try:
                     pneus_ia = extrair_json_da_resposta(resposta_ia.text)
-
                     tabela_df = st.session_state.dados_relatorio
                     pneus_estruturados = []
                     for item in pneus_ia:
@@ -519,9 +223,7 @@ if uploaded_files:
             except Exception as e:
                 st.error(f"Erro no processamento: {str(e)}")
 
-    # --------------------------------------------------------------------
-    # EXIBIÇÃO DOS RESULTADOS
-    # --------------------------------------------------------------------
+    # Exibição dos Resultados
     if st.session_state.inspection_results:
         st.markdown("---")
         st.subheader("📊 Laudo Consolidado")
@@ -582,6 +284,5 @@ if uploaded_files:
                         file_name=f"laudo_pneus_bruto_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                         mime="application/pdf",
                     )
-
 else:
     st.info("👆 Envie o relatório e as fotos para começar.")
